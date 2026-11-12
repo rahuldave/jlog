@@ -465,8 +465,10 @@ So these rules apply:
   missing program stops them with its install line.
 - **`jlog env` logs the names of all variables, and the values of a safe list
   only.** The safe list has exact names, not prefixes. The names are `PATH`,
-  `SHELL`, `HOME`, `TERM`, `CI`, `CODEX_THREAD_ID`, `CLAUDE_CODE_SESSION_ID`
-  and `CLAUDE_CODE_CHILD_SESSION`. For any other variable, it logs the name and
+  `SHELL`, `HOME`, `PWD`, `OLDPWD`, `TERM`, `CI`, `CODEX_THREAD_ID`,
+  `CLAUDE_CODE_SESSION_ID` and `CLAUDE_CODE_CHILD_SESSION`. `PWD` and `OLDPWD`
+  hold folders, and a line that names the current folder must keep its path.
+  For any other variable, it logs the name and
   the word `redacted`. It also logs whether the value changed since the last
   session. It compares keyed hashes. The key stays on the machine, so a reader
   of the log cannot test a guess of the value.

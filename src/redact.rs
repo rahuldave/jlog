@@ -1,10 +1,14 @@
 //! Removes the values of secret variables from the text that jlog logs.
 
 /// The variables whose values jlog may log. The names are exact, not prefixes.
-pub const SAFE: [&str; 8] = [
+/// `PWD` and `OLDPWD` hold folders, so a line that names the current folder
+/// keeps its path.
+pub const SAFE: [&str; 10] = [
     "PATH",
     "SHELL",
     "HOME",
+    "PWD",
+    "OLDPWD",
     "TERM",
     "CI",
     "CODEX_THREAD_ID",
@@ -88,6 +92,8 @@ mod tests {
         let vars = [
             ("PATH", "/usr/bin:/bin"),
             ("HOME", "/Users/someone"),
+            ("PWD", "/Users/someone/project"),
+            ("OLDPWD", "/Users/someone/other"),
             ("SHORT", "abc"),
             ("TOKEN", "s3cr3t-value"),
         ];

@@ -1,0 +1,32 @@
+# Runs `just check` on Linux and on macOS for each push to main and each PR.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - uses: astral-sh/setup-uv@v6
+      # prose-check needs the nossaifd checker. It is cloned outside the
+      # repository, so diff-check does not see it as untracked files.
+      - name: Clone nossaifd
+        run: git clone --depth 1 https://github.com/rahuldave/nossaifd "$RUNNER_TEMP/nossaifd"
+      - name: just check
+        env:
+          NOSSAIFD: ${{ runner.temp }}/nossaifd
+        run: just check
