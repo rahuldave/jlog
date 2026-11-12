@@ -38,7 +38,7 @@ fn git(dir: &Path, args: &[&str]) -> Output {
 }
 
 fn just(dir: &Path, args: &[&str]) -> Output {
-    Command::new("just")
+    common::cmd("just")
         .args(args)
         .current_dir(dir)
         .output()
@@ -70,7 +70,7 @@ fn each_line_of_a_recipe_is_logged_with_the_argv_and_one_run() {
 #[test]
 fn sigterm_to_just_stops_the_line_as_with_plain_sh() {
     let r = repo("a:\n  sleep 2; echo late > after.txt\n");
-    let mut child = Command::new("just")
+    let mut child = common::cmd("just")
         .arg("a")
         .current_dir(r.path())
         .spawn()
@@ -125,7 +125,7 @@ fn a_shell_call_in_a_recipe_line_is_tagged_as_a_backtick() {
 fn a_backtick_is_tagged_when_just_runs_in_a_terminal() {
     let r = repo("x := `echo bt`\na:\n  echo {{x}}\n");
     // script(1) gives just a pseudo-terminal as its stdout.
-    let out = Command::new("script")
+    let out = common::cmd("script")
         .args(["-q", "/dev/null", "just", "a"])
         .current_dir(r.path())
         .output()

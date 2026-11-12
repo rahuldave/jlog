@@ -5,7 +5,7 @@ use std::ffi::OsString;
 use std::io::Write;
 use std::os::unix::process::ExitStatusExt;
 use std::process::Command;
-use std::sync::atomic::{AtomicI32, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::time::SystemTime;
 
 use serde::Serialize;
@@ -27,6 +27,8 @@ pub struct Line {
     pub end: String,
     /// `line` for a line of a recipe, `backtick` for a backtick.
     pub kind: &'static str,
+    #[serde(flatten)]
+    pub session: crate::session::Session,
 }
 
 /// The index of the line in the arguments after the shell, or None when
@@ -173,8 +175,18 @@ fn warn(msg: std::fmt::Arguments) {
 /// The process ID of the shell, for the signal handler. It is 0 before the
 /// spawn and after the wait.
 static CHILD: AtomicI32 = AtomicI32::new(0);
-/// A signal that came before the shell had a process ID.
+/// A signal that came before the shell had a process ID, or after it ended.
 static PENDING: AtomicI32 = AtomicI32::new(0);
+/// True once the shell has ended, or could not start. A signal after that
+/// stops the work of jlog, such as the first line of a session.
+static DONE: AtomicBool = AtomicBool::new(false);
+
+/// True when a signal came after the shell ended. The plugin and the tools
+/// run in groups of their own, so a signal does not reach them; jlog stops
+/// them instead.
+pub fn stopping() -> bool {
+    DONE.load(Ordering::SeqCst) && PENDING.load(Ordering::SeqCst) != 0
+}
 
 extern "C" fn forward(sig: libc::c_int) {
     let pid = CHILD.load(Ordering::SeqCst);
@@ -205,6 +217,7 @@ pub fn run(args: &[OsString]) -> i32 {
             // not free yet. Clear it before the reap, so a late signal is not
             // sent to another process.
             CHILD.store(0, Ordering::SeqCst);
+            DONE.store(true, Ordering::SeqCst);
             match child.wait() {
                 Ok(status) => match (status.code(), status.signal()) {
                     (Some(c), _) => Exit::Code(c),
@@ -225,10 +238,17 @@ pub fn run(args: &[OsString]) -> i32 {
             Exit::Code(127)
         }
     };
+    DONE.store(true, Ordering::SeqCst);
     let end = SystemTime::now();
 
     log(shell, rest, code.number(), start, end, started);
-    code.finish()
+    // A signal after the shell ended, during the logging, stops jlog with
+    // that signal, unless the shell itself ended by a signal.
+    let late = PENDING.swap(0, Ordering::SeqCst);
+    match code {
+        Exit::Code(_) if late != 0 => Exit::Signal(late).finish(),
+        _ => code.finish(),
+    }
 }
 
 enum Exit {
@@ -281,7 +301,13 @@ pub fn reraise(sig: i32) -> bool {
     .contains(&sig)
 }
 
-extern "C" fn ignore(_sig: libc::c_int) {}
+/// While the shell runs, ^C and ^\ reach the shell from the terminal, so
+/// jlog only waits. After the shell ends, they stop jlog.
+extern "C" fn ignore(sig: libc::c_int) {
+    if DONE.load(Ordering::SeqCst) {
+        PENDING.store(sig, Ordering::SeqCst);
+    }
+}
 
 /// Records the process ID of the shell for the handler, and sends on a
 /// signal that came before the shell had one.
@@ -395,9 +421,26 @@ fn log(
         start: time::utc(start),
         end: time::utc(end),
         kind,
+        session: crate::session::Session::detect(),
     };
     let json = serde_json::to_string(&entry).expect("a Line always serializes");
-    if let Err(e) = logdir::append(&root, home.as_deref(), &json) {
+    let written = logdir::LogDir::open(&root, home.as_deref()).and_then(|dir| {
+        dir.append(&json)?;
+        // The first line of a session also logs the session, the environment
+        // and the tools. Their failure never fails the line.
+        match dir.mark_session(&entry.session.marker()) {
+            Ok(true) => {
+                if let Err(e) = crate::commands::first_of_session(&dir, &entry.run, &entry.session)
+                {
+                    warn(format_args!("could not log the session: {e}"));
+                }
+            }
+            Ok(false) => {}
+            Err(e) => warn(format_args!("could not mark the session: {e}")),
+        }
+        Ok(())
+    });
+    if let Err(e) = written {
         warn(format_args!(
             "could not write the run log in {}: {e}",
             root.join(logdir::LOG).display()

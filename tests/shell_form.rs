@@ -4,12 +4,11 @@ mod common;
 
 use std::fs;
 use std::os::unix::process::ExitStatusExt;
-use std::process::Command;
 
 use common::{JLOG, project, run_log};
 
 fn jlog(dir: &std::path::Path, args: &[&str]) -> std::process::Output {
-    Command::new(JLOG)
+    common::cmd(JLOG)
         .args(args)
         .current_dir(dir)
         .output()
@@ -37,8 +36,12 @@ fn logs_one_line_with_the_fields() {
     let keys: Vec<&str> = e.as_object().unwrap().keys().map(String::as_str).collect();
     assert_eq!(
         keys,
-        ["argv", "end", "exit", "kind", "line", "run", "start"]
+        [
+            "argv", "child", "end", "exit", "harness", "kind", "line", "run", "session", "start"
+        ]
     );
+    assert_eq!(e["harness"], "terminal");
+    assert_eq!(e["child"], false);
     assert_eq!(e["line"], "true");
     assert_eq!(e["exit"], 0);
     assert!(e["run"].as_str().unwrap().contains('-'));
@@ -64,7 +67,7 @@ fn a_killed_shell_kills_jlog_with_the_same_signal() {
 #[test]
 fn sigterm_to_jlog_reaches_the_shell_and_is_logged() {
     let p = project();
-    let mut child = Command::new(JLOG)
+    let mut child = common::cmd(JLOG)
         .args(["sh", "-c", "sleep 2; echo late > after.txt"])
         .current_dir(p.path())
         .spawn()
@@ -85,7 +88,7 @@ fn sigterm_to_jlog_reaches_the_shell_and_is_logged() {
 #[test]
 fn sighup_to_jlog_reaches_the_shell() {
     let p = project();
-    let mut child = Command::new(JLOG)
+    let mut child = common::cmd(JLOG)
         .args(["sh", "-c", "sleep 5"])
         .current_dir(p.path())
         .spawn()
@@ -122,7 +125,7 @@ fn a_closed_stderr_does_not_stop_jlog() {
         (&[], 2),
     ];
     for (args, code) in cases {
-        let status = Command::new(JLOG)
+        let status = common::cmd(JLOG)
             .args(args)
             .current_dir(p.path())
             .stderr(write.try_clone().unwrap())
@@ -131,7 +134,7 @@ fn a_closed_stderr_does_not_stop_jlog() {
         assert_eq!(status.code(), Some(code), "{args:?}");
     }
     for flag in ["--version", "--help"] {
-        let status = Command::new(JLOG)
+        let status = common::cmd(JLOG)
             .arg(flag)
             .stdout(write.try_clone().unwrap())
             .status()
@@ -144,7 +147,7 @@ fn a_closed_stderr_does_not_stop_jlog() {
 fn an_ignored_sighup_stays_ignored_in_the_shell() {
     let p = project();
     // nohup makes SIGHUP ignored for jlog, and so for the shell.
-    let out = Command::new("nohup")
+    let out = common::cmd("nohup")
         .args([JLOG, "sh", "-c", "kill -HUP $$; echo survived"])
         .current_dir(p.path())
         .output()
@@ -156,7 +159,7 @@ fn an_ignored_sighup_stays_ignored_in_the_shell() {
 #[test]
 fn sigint_to_jlog_alone_leaves_the_line_running() {
     let p = project();
-    let mut child = Command::new(JLOG)
+    let mut child = common::cmd(JLOG)
         .args(["sh", "-c", "sleep 1; exit 3"])
         .current_dir(p.path())
         .spawn()
@@ -178,7 +181,7 @@ fn an_early_sigterm_leaves_no_shell_running() {
     let mut children = Vec::new();
     for i in 0..20 {
         let line = format!("sleep 1; echo late > after{i}.txt");
-        let child = Command::new(JLOG)
+        let child = common::cmd(JLOG)
             .args(["sh", "-c", &line])
             .current_dir(p.path())
             .spawn()
@@ -252,7 +255,7 @@ fn does_not_log_into_the_agents_folder_of_home() {
     let home = project();
     let repo = home.path().join("repo");
     fs::create_dir(&repo).unwrap();
-    Command::new(JLOG)
+    common::cmd(JLOG)
         .args(["sh", "-c", "true"])
         .current_dir(&repo)
         .env("HOME", home.path())
@@ -264,7 +267,7 @@ fn does_not_log_into_the_agents_folder_of_home() {
 #[test]
 fn redacts_secret_values_from_the_line() {
     let p = project();
-    Command::new(JLOG)
+    common::cmd(JLOG)
         .args(["sh", "-c", "echo hunter2-hunter2 short1 /safe/path"])
         .current_dir(p.path())
         .env("JLOG_TEST_TOKEN", "hunter2-hunter2")
@@ -284,7 +287,7 @@ fn a_line_that_names_the_current_folder_keeps_its_path() {
     let p = project();
     let here = fs::canonicalize(p.path()).unwrap();
     let line = format!("ls {} > /dev/null", here.display());
-    Command::new(JLOG)
+    common::cmd(JLOG)
         .args(["sh", "-c", &line])
         .current_dir(&here)
         // Only the two variables under test, so that no other value, such as
@@ -319,9 +322,9 @@ fn a_failed_log_write_warns_and_keeps_the_exit_code() {
 
 #[test]
 fn no_arguments_print_the_usage() {
-    let out = Command::new(JLOG).output().unwrap();
+    let out = common::cmd(JLOG).output().unwrap();
     assert_eq!(out.status.code(), Some(2));
     assert!(String::from_utf8_lossy(&out.stderr).contains("usage: jlog"));
-    let v = Command::new(JLOG).arg("--version").output().unwrap();
+    let v = common::cmd(JLOG).arg("--version").output().unwrap();
     assert!(String::from_utf8_lossy(&v.stdout).starts_with("jlog "));
 }
