@@ -280,6 +280,25 @@ fn redacts_secret_values_from_the_line() {
 }
 
 #[test]
+fn a_line_that_names_the_current_folder_keeps_its_path() {
+    let p = project();
+    let here = fs::canonicalize(p.path()).unwrap();
+    let line = format!("ls {} > /dev/null", here.display());
+    Command::new(JLOG)
+        .args(["sh", "-c", &line])
+        .current_dir(&here)
+        // Only the two variables under test, so that no other value, such as
+        // TMPDIR, is redacted from the path.
+        .env_clear()
+        .env("PATH", std::env::var_os("PATH").unwrap())
+        .env("PWD", &here)
+        .env("OLDPWD", &here)
+        .output()
+        .unwrap();
+    assert_eq!(run_log(&here)[0]["line"], line.as_str());
+}
+
+#[test]
 fn the_line_is_null_when_no_flag_names_it() {
     let p = project();
     fs::write(p.path().join("s.sh"), "true\n").unwrap();

@@ -95,10 +95,12 @@ If `jlog` finds no folder, it runs the line and logs nothing. On its first write
 A line can hold a secret, for example a value from a `.env` file. Before `jlog` logs `line` and `argv`, it removes the value of each variable of its environment that has 8 or more characters. It trims spaces and newlines from each value first. It writes `<redacted>` in place of the value. These variables are safe, and `jlog` keeps their values:
 
 ```text
-PATH SHELL HOME TERM CI CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION
+PATH SHELL HOME PWD OLDPWD TERM CI CODEX_THREAD_ID CLAUDE_CODE_SESSION_ID CLAUDE_CODE_CHILD_SESSION
 ```
 
-Other values with 8 or more characters are redacted too. For example, `PWD` holds the current folder, and `LANG` can hold `en_US.UTF-8`. So a line that names the current folder, or the text `en_US.UTF-8`, logs `<redacted>` in its place.
+`jlog` trusts these names whatever set them. So do not put a secret in one of them, for example with `PWD=...` in a `.env` file.
+
+Other values with 8 or more characters are redacted too. For example, `LANG` can hold `en_US.UTF-8`, so a line that holds the text `en_US.UTF-8` logs `<redacted>` in its place.
 
 An argument of a recipe is in the environment only with `set export` or `set dotenv-load`. If the argument is not in the environment, `jlog` cannot know that it is a secret.
 
@@ -125,7 +127,7 @@ Run each task with `just`:
 | `just bench` | Measures the time that `jlog` adds to each line. |
 | `just install` | Installs `jlog`, and copies the plugins to `~/.local/share/jlog/plugins/`. |
 
-The labs need `just`, git and `script(1)`, and the bench needs Perl. `jlog` runs on macOS and Linux. The tests ran on macOS only.
+The labs need `just`, git and `script(1)`, and the bench needs Perl. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR.
 
 ## License
 

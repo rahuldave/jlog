@@ -226,15 +226,6 @@ pub use imp::{argv, info};
 mod tests {
     use super::*;
 
-    #[test]
-    fn reads_this_process() {
-        let me = info(std::process::id() as i32).unwrap();
-        assert!(me.ppid > 0);
-        assert!(me.start > 1_600_000_000);
-        let a = argv(std::process::id() as i32).unwrap();
-        assert!(!a.is_empty());
-    }
-
     /// A buffer as the kernel lays it out: argv[0] starts at the next 8-byte
     /// boundary after the NUL of the path.
     fn procargs(path: &str, args: &[&str]) -> Vec<u8> {
@@ -287,19 +278,81 @@ mod tests {
             );
         }
     }
+}
+
+/// Tests that run on macOS and on Linux.
+#[cfg(test)]
+mod tests_any {
+    use super::*;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+
+    #[test]
+    fn reads_this_process() {
+        let me = info(std::process::id() as i32).unwrap();
+        assert!(me.ppid > 0);
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        assert!(me.start > now - 86_400 && me.start <= now, "{}", me.start);
+        assert!(!argv(std::process::id() as i32).unwrap().is_empty());
+    }
+
+    #[test]
+    fn reads_the_name_parent_and_argv_of_a_child() {
+        let mut child = Command::new("sh")
+            .args(["-c", "sleep 5; :", "name", "x y"])
+            .spawn()
+            .unwrap();
+        std::thread::sleep(Duration::from_millis(150));
+        let pid = child.id() as i32;
+        let p = info(pid);
+        let a = argv(pid);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let p = p.unwrap();
+        assert_eq!(p.ppid, std::process::id() as i32);
+        assert!(!p.name.is_empty());
+        assert_eq!(a.unwrap(), ["sh", "-c", "sleep 5; :", "name", "x y"]);
+    }
 
     #[test]
     fn reads_an_empty_argv0_of_a_real_process() {
-        use std::os::unix::process::CommandExt;
-        let mut child = std::process::Command::new("/bin/sleep")
-            .arg0("")
-            .arg("5")
-            .spawn()
-            .unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        let mut child = Command::new("sleep").arg0("").arg("5").spawn().unwrap();
+        std::thread::sleep(Duration::from_millis(150));
         let got = argv(child.id() as i32);
         child.kill().unwrap();
         child.wait().unwrap();
-        assert_eq!(got.unwrap(), strings(&["", "5"]));
+        assert_eq!(got.unwrap(), ["", "5"]);
+    }
+
+    #[test]
+    fn two_children_on_one_pipe_share_a_handle_and_others_differ() {
+        use std::os::fd::{FromRawFd, OwnedFd};
+        let mut fds = [0; 2];
+        // SAFETY: fds has room for the two descriptors of the pipe.
+        assert_eq!(unsafe { libc::pipe(fds.as_mut_ptr()) }, 0);
+        // SAFETY: each descriptor is open, and each is owned once.
+        let (_read, write) =
+            unsafe { (OwnedFd::from_raw_fd(fds[0]), OwnedFd::from_raw_fd(fds[1])) };
+        let spawn = |out: Stdio| Command::new("sleep").arg("5").stdout(out).spawn().unwrap();
+        let mut a = spawn(Stdio::from(write.try_clone().unwrap()));
+        let mut b = spawn(Stdio::from(write.try_clone().unwrap()));
+        let mut c = spawn(Stdio::piped());
+        std::thread::sleep(Duration::from_millis(150));
+        let (pa, pb, pc) = (
+            pipe_of_stdout(a.id() as i32),
+            pipe_of_stdout(b.id() as i32),
+            pipe_of_stdout(c.id() as i32),
+        );
+        for child in [&mut a, &mut b, &mut c] {
+            child.kill().unwrap();
+            child.wait().unwrap();
+        }
+        assert!(pa.is_some() && pc.is_some());
+        assert_eq!(pa, pb, "one pipe, one handle");
+        assert_ne!(pa, pc, "two pipes, two handles");
     }
 }
