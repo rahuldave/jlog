@@ -16,11 +16,17 @@ body="$(for _ in $(seq "$n"); do printf '  true\n'; done)"
 printf 'set shell := ["sh", "-cu"]\na:\n%s\n' "$body" > "$dir/plain.just"
 printf 'set shell := ["%s", "sh", "-cu"]\na:\n%s\n' "$jlog" "$body" > "$dir/jlog.just"
 
+# The bench runs as a terminal session, with a home folder of its own, so it
+# reads no transcript and writes no key into the real home. The first line
+# logs the session, the environment and the tools, and the best round hides it.
+mkdir -p "$dir/home"
+quiet_env=(env -u CODEX_THREAD_ID -u CLAUDE_CODE_SESSION_ID -u CLAUDE_CODE_CHILD_SESSION -u JLOG_SESSION "HOME=$dir/home" "JLOG_PLUGINS=$dir/no-plugins")
+
 # The time of one run of a Justfile, in milliseconds.
 once() {
     local t0 t1
     t0="$(perl -MTime::HiRes=time -e 'printf "%.6f", time')"
-    just --quiet --justfile "$dir/$1" --working-directory "$dir" a >/dev/null
+    "${quiet_env[@]}" just --quiet --justfile "$dir/$1" --working-directory "$dir" a >/dev/null
     t1="$(perl -MTime::HiRes=time -e 'printf "%.6f", time')"
     perl -e "printf '%.1f', ($t1 - $t0) * 1000"
 }

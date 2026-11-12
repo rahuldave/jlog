@@ -1,0 +1,9 @@
+[project]
+name = "jlog-plugin-claude"
+version = "0.1.0"
+description = "The Claude Code plugin of jlog: it finds the transcript and the model of a session."
+requires-python = ">=3.9"
+dependencies = []
+
+[tool.uv]
+package = false

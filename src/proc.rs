@@ -79,6 +79,33 @@ mod imp {
         })
     }
 
+    /// The start time of any process, in seconds since 1970, from
+    /// `sysctl(KERN_PROC_PID)`. `proc_pidinfo` fails for a process of root,
+    /// such as the `login` that leads a tab of Terminal.app, but this call
+    /// works for it. The start time is the first field of `kinfo_proc`.
+    pub fn start_time(pid: i32) -> Option<u64> {
+        // The size of struct kinfo_proc on 64-bit macOS.
+        let mut buf = [0u8; 648];
+        let mut len = buf.len();
+        let mut mib = [libc::CTL_KERN, libc::KERN_PROC, libc::KERN_PROC_PID, pid];
+        // SAFETY: the call writes at most len bytes into buf, and sets len.
+        let rc = unsafe {
+            libc::sysctl(
+                mib.as_mut_ptr(),
+                4,
+                buf.as_mut_ptr().cast(),
+                &mut len,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
+        if rc != 0 || len != buf.len() {
+            return None;
+        }
+        let sec = i64::from_ne_bytes(buf[..8].try_into().ok()?);
+        u64::try_from(sec).ok().filter(|&s| s > 0)
+    }
+
     pub fn argv(pid: i32) -> Option<Vec<String>> {
         let mut mib = [libc::CTL_KERN, libc::KERN_PROCARGS2, pid];
         let mut size: libc::size_t = 0;
@@ -187,6 +214,10 @@ mod imp {
         })
     }
 
+    pub fn start_time(pid: i32) -> Option<u64> {
+        info(pid).map(|p| p.start)
+    }
+
     fn boot_time() -> Option<u64> {
         let stat = fs::read_to_string("/proc/stat").ok()?;
         stat.lines()
@@ -220,7 +251,7 @@ mod imp {
 }
 
 use imp::pipe_of_stdout;
-pub use imp::{argv, info};
+pub use imp::{argv, info, start_time};
 
 #[cfg(all(test, target_os = "macos"))]
 mod tests {
@@ -287,6 +318,15 @@ mod tests_any {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::Duration;
+
+    #[test]
+    fn the_start_time_works_for_a_process_of_root_and_matches_info() {
+        // Process 1 belongs to root, as the login of a terminal tab does.
+        assert!(start_time(1).is_some_and(|s| s > 1_000_000_000));
+        let me = std::process::id() as i32;
+        assert_eq!(start_time(me), info(me).map(|p| p.start));
+        assert_eq!(start_time(i32::MAX), None);
+    }
 
     #[test]
     fn reads_this_process() {

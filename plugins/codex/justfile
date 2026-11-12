@@ -1,0 +1,13 @@
+# The codex plugin of jlog. The root Justfile loads this file as the module `codex`.
+set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+
+# Run the tests of the plugin, on fake transcripts
+test:
+    uv run --project . --frozen --quiet python -I -m unittest discover -s tests
+
+# Check that the lock file matches pyproject.toml
+lock-check:
+    uv lock --check --project .
+
+# Everything that must pass for the plugin
+check: lock-check test

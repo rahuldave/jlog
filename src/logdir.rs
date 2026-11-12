@@ -86,15 +86,8 @@ pub fn find_root_with(
 
 /// Appends one line to the run log of `root`. On the first write it makes
 /// the log folder and its `.gitignore`, which holds the one line `*`.
-///
-/// jlog opens `.agents` once and checks the real path of that open folder,
-/// so a symlink swapped in after `find_root` cannot send the log into a home
-/// `.agents`. It makes the log folder and both files inside open folders,
-/// with no symlink followed. The run log must be a regular file with one
-/// link, so a FIFO cannot make the line wait for ever, and a hard link
-/// cannot send the log elsewhere.
 pub fn append(root: &Path, home: Option<&Path>, line: &str) -> io::Result<()> {
-    append_with(root, home, &HOME_PARENTS, &ROOT_HOMES, line)
+    LogDir::open(root, home)?.append(line)
 }
 
 pub fn append_with(
@@ -104,55 +97,187 @@ pub fn append_with(
     root_homes: &[&str],
     line: &str,
 ) -> io::Result<()> {
-    let agents = open_c(&root.join(".agents"), libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
-    let homey = |d: &Path| is_home(d, home, home_parents, root_homes);
-    if in_home_agents(&fd_path(&agents)?, &homey) {
-        return Err(io::Error::other(
-            "the .agents folder is inside a home .agents",
-        ));
+    LogDir::open_with(root, home, home_parents, root_homes)?.append(line)
+}
+
+/// The open log folder, `.agents/log`.
+///
+/// jlog opens `.agents` once and checks the real path of that open folder,
+/// so a symlink swapped in after `find_root` cannot send the log into a home
+/// `.agents`. It makes the log folder and each file inside open folders,
+/// with no symlink followed. Each file must be a regular file with one link,
+/// so a FIFO cannot make jlog wait for ever, and a hard link cannot send a
+/// write elsewhere.
+pub struct LogDir {
+    dir: fs::File,
+}
+
+impl LogDir {
+    pub fn open(root: &Path, home: Option<&Path>) -> io::Result<LogDir> {
+        Self::open_with(root, home, &HOME_PARENTS, &ROOT_HOMES)
     }
-    let log = c"log";
-    // SAFETY: agents is an open folder and log is a valid C string.
-    if unsafe { libc::mkdirat(raw(&agents), log.as_ptr(), 0o755) } != 0 {
+
+    pub fn open_with(
+        root: &Path,
+        home: Option<&Path>,
+        home_parents: &[&str],
+        root_homes: &[&str],
+    ) -> io::Result<LogDir> {
+        let agents = open_c(&root.join(".agents"), libc::O_RDONLY | libc::O_DIRECTORY, 0)?;
+        let homey = |d: &Path| is_home(d, home, home_parents, root_homes);
+        if in_home_agents(&fd_path(&agents)?, &homey) {
+            return Err(io::Error::other(
+                "the .agents folder is inside a home .agents",
+            ));
+        }
+        let dir = subdir(&agents, c"log")
+            .map_err(|e| with_context(e, "the log folder is not a plain folder"))?;
+        match openat(
+            &dir,
+            c".gitignore",
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o644,
+        ) {
+            Ok(f) => (&f).write_all(b"*\n")?,
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+        Ok(LogDir { dir })
+    }
+
+    /// Appends one line to the run log.
+    pub fn append(&self, line: &str) -> io::Result<()> {
+        let file = openat(
+            &self.dir,
+            c"just.jsonl",
+            libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            0o644,
+        )?;
+        plain(&file, "the run log")?;
+        let mut buf = Vec::with_capacity(line.len() + 1);
+        buf.extend_from_slice(line.as_bytes());
+        buf.push(b'\n');
+        // One write with O_APPEND, so that lines of parallel recipes do not mix.
+        (&file).write_all(&buf)
+    }
+
+    /// Makes the marker `sessions/<name>`. True when this call made it, so
+    /// only the first line of a session gets true, even in parallel.
+    pub fn mark_session(&self, name: &str) -> io::Result<bool> {
+        let name = file_name(name)?;
+        let sessions = match openat(&self.dir, c"sessions", DIR_FLAGS, 0) {
+            Ok(d) => d,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => subdir(&self.dir, c"sessions")?,
+            Err(e) => return Err(e),
+        };
+        match openat(
+            &sessions,
+            &name,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o644,
+        ) {
+            Ok(_) => Ok(true),
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => Ok(false),
+            Err(e) => Err(e),
+        }
+    }
+
+    /// The bytes of the file `name` in the log folder, or None when it does
+    /// not exist. At most `max` bytes are read.
+    pub fn read(&self, name: &str, max: u64) -> io::Result<Option<Vec<u8>>> {
+        use std::io::Read;
+        let name = file_name(name)?;
+        let file = match openat(
+            &self.dir,
+            &name,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            0,
+        ) {
+            Ok(f) => f,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(None),
+            Err(e) => return Err(e),
+        };
+        plain(&file, name.to_str().unwrap_or("the file"))?;
+        let mut buf = Vec::new();
+        file.take(max).read_to_end(&mut buf)?;
+        Ok(Some(buf))
+    }
+
+    /// Replaces the file `name` in the log folder with `bytes`, through a
+    /// new file and a rename, so a reader never sees half of it.
+    pub fn replace(&self, name: &str, bytes: &[u8]) -> io::Result<()> {
+        use std::os::fd::AsRawFd;
+        let final_name = file_name(name)?;
+        let tmp = file_name(&format!(".{name}.{}", std::process::id()))?;
+        // SAFETY: dir is an open folder and tmp is a valid C string. A
+        // missing file is the usual case, so the result is ignored.
+        unsafe { libc::unlinkat(self.dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        let file = openat(
+            &self.dir,
+            &tmp,
+            libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o644,
+        )?;
+        let written = (&file).write_all(bytes);
+        drop(file);
+        // SAFETY: as above; renameat replaces the name, never a target it follows.
+        let renamed = written.and_then(|()| {
+            let r = unsafe {
+                libc::renameat(
+                    self.dir.as_raw_fd(),
+                    tmp.as_ptr(),
+                    self.dir.as_raw_fd(),
+                    final_name.as_ptr(),
+                )
+            };
+            if r == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        });
+        if renamed.is_err() {
+            // SAFETY: as above.
+            unsafe { libc::unlinkat(self.dir.as_raw_fd(), tmp.as_ptr(), 0) };
+        }
+        renamed
+    }
+}
+
+const DIR_FLAGS: i32 = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW;
+
+/// Opens the folder `name` inside `parent`, and makes it first if needed.
+fn subdir(parent: &fs::File, name: &std::ffi::CStr) -> io::Result<fs::File> {
+    // SAFETY: parent is an open folder and name is a valid C string.
+    if unsafe { libc::mkdirat(raw(parent), name.as_ptr(), 0o755) } != 0 {
         let e = io::Error::last_os_error();
         if e.kind() != io::ErrorKind::AlreadyExists {
             return Err(e);
         }
     }
-    let dir = openat(
-        &agents,
-        log,
-        libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW,
-        0,
-    )
-    .map_err(|e| with_context(e, "the log folder is not a plain folder"))?;
-    match openat(
-        &dir,
-        c".gitignore",
-        libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
-        0o644,
-    ) {
-        Ok(f) => (&f).write_all(b"*\n")?,
-        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-        Err(e) => return Err(e),
-    }
-    let file = openat(
-        &dir,
-        c"just.jsonl",
-        libc::O_WRONLY | libc::O_APPEND | libc::O_CREAT | libc::O_NOFOLLOW | libc::O_NONBLOCK,
-        0o644,
-    )?;
+    openat(parent, name, DIR_FLAGS, 0)
+}
+
+/// Fails unless `file` is a regular file with one link.
+fn plain(file: &fs::File, what: &str) -> io::Result<()> {
     let meta = file.metadata()?;
     if !meta.is_file() || meta.nlink() != 1 {
-        return Err(io::Error::other(
-            "the run log is not a regular file with one link",
+        return Err(io::Error::other(format!(
+            "{what} is not a regular file with one link"
+        )));
+    }
+    Ok(())
+}
+
+/// A plain file name: no slash, not `.` or `..`, no NUL, not empty.
+fn file_name(name: &str) -> io::Result<std::ffi::CString> {
+    if name.is_empty() || name == "." || name == ".." || name.contains('/') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            format!("not a plain file name: {name:?}"),
         ));
     }
-    let mut buf = Vec::with_capacity(line.len() + 1);
-    buf.extend_from_slice(line.as_bytes());
-    buf.push(b'\n');
-    // One write with O_APPEND, so that lines of parallel recipes do not mix.
-    (&file).write_all(&buf)
+    std::ffi::CString::new(name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))
 }
 
 fn raw(f: &fs::File) -> i32 {

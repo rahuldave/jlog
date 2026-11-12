@@ -11,6 +11,14 @@ need_home := 'if [ -z "' + home + '" ]; then echo "this recipe needs HOME, or JL
 # Where jlog copies the plugins. JLOG_PLUGINS can name another folder.
 plugins_dir := env_var_or_default("JLOG_PLUGINS", home / ".local/share/jlog/plugins")
 
+# Each plugin has its own justfile, loaded as a module, for example `just claude::test`.
+
+# The plugin for Claude Code
+mod claude 'plugins/claude'
+
+# The plugin for Codex
+mod codex 'plugins/codex'
+
 [private]
 default:
     @just --list --unsorted
@@ -54,11 +62,18 @@ prose-check:
 bench: build
     bash scripts/bench.sh target/release/jlog
 
+# The plugins go before the tests, so their environments exist when the labs run them.
+
 # Everything that must pass before a commit
-check: fmt-check lint test diff-check prose-check
+check: fmt-check lint claude::check codex::check test diff-check prose-check
 
 # Install jlog with cargo, and copy the plugins to the plugins folder
-install: build
-    {{ if env_var_or_default("JLOG_PLUGINS", "") == "" { need_home } else { "true" } }}
+install: build install-plugins
     cargo install --path . --locked
-    if [ -d plugins ]; then mkdir -p "{{plugins_dir}}" && cp -R plugins/. "{{plugins_dir}}/"; fi
+
+# Copy the plugins to the plugins folder, and make the environment of each one
+install-plugins:
+    {{ if env_var_or_default("JLOG_PLUGINS", "") == "" { need_home } else { "true" } }}
+    for d in plugins/*/; do n="$(basename "$d")"; mkdir -p "{{plugins_dir}}/$n"; cp "$d/pyproject.toml" "$d/uv.lock" "$d/session.py" "{{plugins_dir}}/$n/"; done
+    # jlog removes these variables when it runs a plugin, so the sync does too, and both find the same environment.
+    for v in $(compgen -e | grep -E '^(UV_|PYTHON)|^VIRTUAL_ENV$' || true); do unset "$v"; done; for d in "{{plugins_dir}}"/*/; do uv sync --quiet --frozen --project "$d"; done

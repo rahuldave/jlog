@@ -4,19 +4,28 @@
 use std::ffi::OsString;
 use std::io::Write;
 
+pub mod capped;
+pub mod commands;
+pub mod env;
 pub mod logdir;
 pub mod proc;
 pub mod redact;
+pub mod session;
 pub mod shell;
 pub mod time;
 
 pub const USAGE: &str = "\
 usage: jlog <shell> <flags> <line> [args...]
+       jlog session | env | tools
+       jlog skip <step> <reason>
 
 Runs <line> with <shell> and adds one JSON line to .agents/log/just.jsonl.
 A Justfile sets it as its shell:
 
     set shell := [\"jlog\", \"sh\", \"-cu\"]
+
+The commands log the session, the environment, the versions of the tools,
+or a step that has nothing to do, and print what they log.
 ";
 
 /// Runs jlog with the arguments after the program name, and returns the exit code.
@@ -34,6 +43,6 @@ pub fn run(args: &[OsString]) -> i32 {
             let _ = writeln!(std::io::stdout(), "jlog {}", env!("CARGO_PKG_VERSION"));
             0
         }
-        _ => shell::run(args),
+        _ => commands::run(args).unwrap_or_else(|| shell::run(args)),
     }
 }
