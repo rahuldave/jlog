@@ -1,3 +1,4 @@
 fn main() {
-    println!("Hello, world!");
+    let args: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    std::process::exit(jlog::run(&args));
 }

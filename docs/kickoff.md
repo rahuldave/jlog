@@ -1,4 +1,4 @@
-You are starting the `jlog` project in ~/Projects/jlog. It is a new Rust binary made with `cargo new`, on branch `main`, with no commits yet. GitHub has no `rahuldave/jlog` repo yet. Do not create one, and do not push.
+You are starting the `jlog` project in ~/Projects/jlog. It is a new Rust binary made with `cargo new`, on branch `main`, with no commits yet. The repository is `rahuldave/jlog` on GitHub, and pushes to `main` are allowed.
 
 ## Read first
 
