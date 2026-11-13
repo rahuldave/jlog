@@ -4,7 +4,7 @@
 
 `just` has no log of its own. So a Justfile sets `jlog` as its shell, and `jlog` runs each line with the real shell. Then it adds one JSON line to the run log, `.agents/log/just.jsonl`.
 
-The shell form, the commands `session`, `env`, `tools` and `skip`, and the plugins for Claude Code and Codex work now. The command `pass` comes next.
+The shell form, the commands `session`, `env`, `tools`, `skip`, `step` and `pass`, and the plugins for Claude Code and Codex work now.
 
 ## Terms
 
@@ -12,7 +12,10 @@ The shell form, the commands `session`, `env`, `tools` and `skip`, and the plugi
 |---|---|
 | Run log | The file `.agents/log/just.jsonl`, with one JSON line for each line that ran. |
 | Log folder | The folder `.agents/log/`. Git ignores it. |
-| Run | One call of `just`. All lines of one call have the same run ID. |
+| Run | One `just check`, or one other call of `just`, with the inner `just` calls that it makes. All its lines have the same run ID. |
+| Step | One recipe of `just check`, for example `lint` or `test`. The list is in `.agents/stack.json`. |
+| Worktree tree | The git tree of all files in the worktree, staged or not, without the files that git ignores. |
+| Pass | A record that says that every step of `just check` passed for one worktree tree. |
 | Backtick | A command in backticks in a Justfile. `just` runs it to get its output. |
 | Harness | The program that runs an agent, for example Claude Code or Codex. |
 | Session | One session of a harness, or one terminal session of a person. |
@@ -39,7 +42,7 @@ test:
   cargo test
 ```
 
-`jlog` knows the line for `sh`, `bash`, `zsh`, `dash` and `python`. Before the line, it accepts only short flags that let the line run, such as `-eu` or `+x`, and the options `-o NAME`, `-O NAME` in bash, and `-W VALUE` or `-X VALUE` in python. Each NAME must be on a short list that lets the line run, for example `errexit`, `nounset`, `pipefail` or `extglob`, so `-o noexec` gives a null line. The last group holds `c`, for example `-c`, `-cu` or `-euc`, and the line is the next argument. So these shells work, for example:
+`jlog` knows the line for `sh`, `bash`, `zsh`, `dash` and `python`. Before the line, it accepts only short flags that let the line run, such as `-eu` or `+x`, and the options `-o NAME`, `-O NAME` in bash, and `-W VALUE` or `-X VALUE` in python. Each NAME must be on a short list that lets the line run, for example `errexit`, `nounset`, `pipefail` or `extglob`, so `-o noexec` gives a null line. The option can also end a group of flags, as in `-euo pipefail`. The last group holds `c`, for example `-c`, `-cu` or `-euc`, and the line is the next argument. So these shells work, for example:
 
 ```just
 set shell := ["jlog", "sh", "-cu"]
@@ -68,7 +71,7 @@ Each line of a recipe then adds a line like this one to the run log:
 
 | Field | Meaning |
 |---|---|
-| `run` | The process ID of `just` and its start time, in seconds since 1970. If the parent of `jlog` is not `just`, the parent counts in place of `just`. |
+| `run` | The value of `JLOG_RUN` when it is set. Otherwise the process ID of `just` and its start time, in seconds since 1970. If the parent of `jlog` is not `just`, the parent counts in place of `just`. |
 | `argv` | The `just` command as a list, with each argument whole. It is empty when the parent of `jlog` is not `just`. |
 | `line` | The line of the recipe, before the shell expands it. It is null when `jlog` cannot tell which argument is the line. |
 | `exit` | The exit code of the shell. A shell that a signal stopped gets 128 plus the number of the signal. |
@@ -79,6 +82,32 @@ Each line of a recipe then adds a line like this one to the run log:
 | `child` | True for a line of a fresh agent. It is null in Codex, where the record `session` names the parent. |
 
 A recipe with a shebang line, or with the attribute `[script]`, does not use the shell of the Justfile. So its lines do not run through `jlog`, and the run log does not show them. The lint of the stack finds such recipes.
+
+## Runs
+
+The root Justfile exports one run ID, so that the inner `just` calls of one `just check` share one run:
+
+```just
+export JLOG_RUN := env("JLOG_RUN", uuid())
+```
+
+The first `just` call makes the ID, and each inner call inherits it. A module must not have the line, because it would make a second ID. Without `JLOG_RUN`, the run is the process ID of the parent `just` and its start time.
+
+Before the first line of a run starts, `jlog` computes the worktree tree and logs it in a record `tree`. The tree is null when git cannot compute it. `jlog` marks the run as seen with an empty file, `.agents/log/runs/run-<id>`, made only if the file is new.
+
+The first line locks the marker until the record `tree` is in the log, so a parallel line of the run waits for it. The lock goes before the first line runs, because that line can be an inner `just` call. A backtick takes no part in this, because the backticks of the outer `just` do not get the exported `JLOG_RUN`.
+
+A person can set `JLOG_RUN` by hand, so `jlog pass` compares the first tree with the tree at the end. So an old ID cannot pass a new tree.
+
+`jlog` computes the tree with a temporary index, so the real index does not change:
+
+```sh
+cp <the real index> <tmp>
+GIT_INDEX_FILE=<tmp> git add -A -- :/
+GIT_INDEX_FILE=<tmp> git write-tree
+```
+
+The copy of the real index keeps its record of each file, so git hashes only the files that changed. With a split index, each copy leaves a `sharedindex` file in `.git`, which git removes after two weeks. Each tree also writes the files that git does not ignore into the objects of git, as `git write-tree` does. A tracked file that git ignores stays in the tree, as in a commit. When an entry of the real index is marked assume-unchanged or skip-worktree, git would not look at that file. Then `jlog` starts the temporary index with `git read-tree HEAD` instead, as the spec says.
 
 ## Sessions
 
@@ -98,7 +127,7 @@ This work makes the first line of a session slower, by about 0.4 to 0.9 s on the
 
 Each command prints one JSON record, and adds it to the run log when it finds a log folder. Each record has `kind`, `run`, `harness`, `session`, `child` and `time`.
 
-A command takes the run from the nearest `just` above it, or null when there is none. A command with no log folder still prints and exits with 0. A failed write exits with 1, and a wrong argument exits with 2.
+A command takes the run from `JLOG_RUN`, or else from the nearest `just` above it, or null when there is none. A command with no log folder still prints and exits with 0. A failed write exits with 1, and a wrong argument exits with 2.
 
 | Command | What it logs |
 |---|---|
@@ -106,8 +135,10 @@ A command takes the run from the nearest `just` above it, or null when there is 
 | `jlog env` | The name of each variable, and its value only for the safe list of the section "Secrets". Each other value shows as `redacted`. |
 | `jlog tools` | The version of each program of the tools table of the spec, with `--version`. |
 | `jlog skip <step> <reason>` | A step with nothing to do, and the reason. A step is a name of letters, digits, `-` and `_`. |
+| `jlog step <step>` | The end of a step that passed. It is the last line of the recipe of each step. |
+| `jlog pass` | A pass for the worktree tree, when each rule of the section "The pass" holds. It is the last line of `check`. |
 
-With no argument, `session`, `env` and `tools` are commands. With arguments, they are the shell form, so `jlog env sh -c LINE` still runs a shell. The name `skip` is always the command. So a typo such as `jlog tools x` runs a program named `tools`, and the run log shows a failed line with exit 127.
+With no argument, `session`, `env` and `tools` are commands. With arguments, they are the shell form, so `jlog env sh -c LINE` still runs a shell. The names `skip`, `step` and `pass` are always commands. So a typo such as `jlog tools x` runs a program named `tools`, and the run log shows a failed line with exit 127.
 
 **`jlog env`** also tells, for each variable, whether its value changed since the last snapshot. It shows `changed` as true or false, and as null when it has nothing to compare with. The list `gone` names the variables that the last snapshot had and this one has not.
 
@@ -116,6 +147,47 @@ With no argument, `session`, `env` and `tools` are commands. With arguments, the
 **`jlog tools`** runs all programs at once, with a limit of 3 seconds. It sets `UV_PYTHON_DOWNLOADS=never`, so no download starts. A missing program shows `"error": "not found"`. The version is the first line of the output that holds a digit.
 
 **`jlog skip`** removes secrets from the step and the reason, as for `line`. It also logs the argv of the nearest `just`.
+
+## The pass
+
+The recipes of the steps end with `jlog step`, and `check` ends with `jlog pass`:
+
+```just
+lint:
+    just --justfile "{{justfile()}}" python lint
+    jlog step lint
+
+typecheck:
+    jlog skip typecheck "no type checker in this repository"
+
+check: lint typecheck
+    jlog pass
+```
+
+`just` stops a recipe at its first failed line. So `jlog step lint` runs only when each line of `lint` before it passed.
+
+`jlog step`, `jlog skip` and `jlog pass` count only as a line of their own. A `jlog` whose parent is `just` must run them, and its line must start with the command, for example `jlog step lint`. Between them, only the shell that this `jlog` started may stand. So each of these fails:
+
+- **A step in a script,** such as a shebang recipe, a `[script]` recipe, or a script that a line runs. A script goes on after a failed line.
+- **A step that a program runs,** such as a test suite.
+- **A step after another command,** such as `false || jlog step lint`.
+
+The line must start with the bare word `jlog`, or with a path to `jlog` that has no space. So `exec jlog step lint` and `VAR=1 jlog step lint` fail too.
+
+A failed command in a pipe does not fail the line in `sh`, so `cargo test | tee log` passes when the tests fail. Use a shell with `pipefail` for such lines, for example `["jlog", "bash", "-eu", "-o", "pipefail", "-c"]`. `jlog pass` writes the record `pass` with the tree only if all of these hold:
+
+- **The call.** The nearest `just` above `jlog pass` has the argv `just check` exactly, with no option and no `NAME=VALUE`.
+- **No variable that changes the run.** None of `JUST_NO_DEPS`, `JUST_SHELL`, `JUST_JUSTFILE`, `JUST_JUSTFILE_NAME`, `JUST_CEILING`, `JUST_WORKING_DIRECTORY`, `JUST_DOTENV_FILENAME`, `JUST_DOTENV_PATH` and `JUST_NO_DOTENV` is set. Other `JUST_` variables, such as `JUST_COLOR`, do not matter.
+- **Each step.** For each step in the list `steps` of `.agents/stack.json`, the run has a record `step` for it. A skip also counts, but only for a step that is not in the list `provided_steps`, the steps that an installed profile provides.
+- **No failed line.** No line of the run has an exit code other than 0. A failed backtick does not count.
+- **The same tree.** The worktree tree now equals the tree of the record `tree` of the run.
+- **Nothing unstaged.** The worktree has no unstaged change, and no untracked file that git does not ignore.
+
+The lines of an inner `just` call count, because they share the run. Otherwise, `jlog pass` prints each reason, logs the record `no-pass` with the list `reasons`, and exits with 1. The record `.agents/stack.json` has these two keys for the pass:
+
+```json
+{"steps": ["fmt-check", "lint", "typecheck", "test", "diff-check"], "provided_steps": ["fmt-check", "lint", "test"]}
+```
 
 ## Plugins
 
@@ -175,9 +247,11 @@ An argument of a recipe is in the environment only with `set export` or `set dot
 
 `scripts/bench.sh` runs a recipe of many lines, first with `sh -cu` and then with `jlog sh -cu`. The rounds alternate, so that a change in the load of the machine hits both forms alike. Run it with `just bench`.
 
-On 2026-11-12, on the machine of the author, `jlog` added 2.7 to 3.6 ms to each line. A small C program that only starts the shell and waits for it added 1.6 to 2.1 ms. So the start of one more process takes most of the time.
+On 2026-11-12, on the machine of the author, `jlog` added 4.1 to 4.5 ms to each line. A small C program that only starts the shell and waits for it added 1.9 to 2.3 ms. So the start of one more process takes about half of the time. The machine was busy during the test, with a load average of 5 to 16, and an earlier run at a load of 6 to 9 gave 2.7 to 3.6 ms.
 
-The work of `jlog` itself takes about 1.1 to 1.5 ms. It finds the folder, reads the argv, finds the session, redacts and writes. The machine was busy during the test, with a load average of 6 to 9. The bench runs as a terminal session with a home folder of its own, and its best round leaves out the first line of the session.
+The work of `jlog` itself takes about 1.8 to 2.2 ms of that time. It finds the folder, reads the argv, finds the session and the run, redacts and writes. The marker of the run and its lock add no CPU time that a test of 1,000 lines could measure. The bench runs as a terminal session with a home folder of its own, and its best round leaves out the first line of the session.
+
+The first line of each run also computes the worktree tree. That takes one `git add -A` on a copy of the index, so its cost grows with the changed files, not with the whole repository.
 
 ## Development
 
