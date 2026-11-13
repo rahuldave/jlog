@@ -4,7 +4,7 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{JLOG, records, run_log};
@@ -433,18 +433,26 @@ fn a_shell_with_joined_flags_and_pipefail_can_pass() {
     assert_eq!(passes(r.path()).len(), 1);
 }
 
-fn count_files(dir: &Path) -> usize {
-    fs::read_dir(dir)
-        .unwrap()
-        .flatten()
-        .map(|e| {
-            if e.file_type().unwrap().is_dir() {
-                count_files(&e.path())
-            } else {
-                1
-            }
-        })
-        .sum()
+/// The files in `dir` and its subfolders. A test compares the sets, not
+/// the counts, because git may pack or prune old objects meanwhile.
+fn files(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut out = std::collections::BTreeSet::new();
+    for e in fs::read_dir(dir).unwrap().flatten() {
+        if e.file_type().unwrap().is_dir() {
+            out.extend(files(&e.path()));
+        } else {
+            out.insert(e.path());
+        }
+    }
+    out
+}
+
+/// The files that are in `after` but not in `before`.
+fn new_files(
+    before: &std::collections::BTreeSet<PathBuf>,
+    after: &std::collections::BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
+    after.difference(before).cloned().collect()
 }
 
 #[test]
@@ -453,7 +461,7 @@ fn a_run_leaves_no_temporary_folder_and_no_new_object() {
     fs::write(r.path().join("src.txt"), "an edit\n").unwrap();
     fs::write(r.path().join("untracked.txt"), "new\n").unwrap();
     let tmp = tempfile::tempdir().unwrap();
-    let before = count_files(&r.path().join(".git/objects"));
+    let before = files(&r.path().join(".git/objects"));
     let out = just(
         r.path(),
         &["check"],
@@ -461,7 +469,10 @@ fn a_run_leaves_no_temporary_folder_and_no_new_object() {
     );
     assert!(!out.status.success(), "the unstaged edit fails the pass");
     assert_eq!(records(r.path(), "tree").len(), 1);
-    assert_eq!(count_files(&r.path().join(".git/objects")), before);
+    assert_eq!(
+        new_files(&before, &files(&r.path().join(".git/objects"))),
+        Vec::<PathBuf>::new()
+    );
     // Only the private folder of the user stays, and it is empty.
     let mut top: Vec<_> = fs::read_dir(tmp.path())
         .unwrap()
