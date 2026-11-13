@@ -99,15 +99,24 @@ The first line locks the marker until the record `tree` is in the log, so a para
 
 A person can set `JLOG_RUN` by hand, so `jlog pass` compares the first tree with the tree at the end. So an old ID cannot pass a new tree.
 
-`jlog` computes the tree with a temporary index, so the real index does not change:
+`jlog` computes the tree with a temporary index and a temporary object store, so the real index does not change, and `.git/objects` gets no new object:
 
 ```sh
-cp <the real index> <tmp>
-GIT_INDEX_FILE=<tmp> git add -A -- :/
-GIT_INDEX_FILE=<tmp> git write-tree
+cp <the real index> <tmp>/index
+export GIT_INDEX_FILE=<tmp>/index
+export GIT_OBJECT_DIRECTORY=<tmp>/objects
+export GIT_ALTERNATE_OBJECT_DIRECTORIES=<the real .git/objects>
+git add -A -- :/
+git write-tree
 ```
 
-The copy of the real index keeps its record of each file, so git hashes only the files that changed. With a split index, each copy leaves a `sharedindex` file in `.git`, which git removes after two weeks. Each tree also writes the files that git does not ignore into the objects of git, as `git write-tree` does. A tracked file that git ignores stays in the tree, as in a commit. When an entry of the real index is marked assume-unchanged or skip-worktree, git would not look at that file. Then `jlog` starts the temporary index with `git read-tree HEAD` instead, as the spec says.
+git reads the objects it already has from the real store and writes the new ones into the temporary store. `jlog` then deletes the folder `<tmp>`. It is named `jlog-tree-<pid>-<nanoseconds>`, inside a private folder `jlog-<user ID>` in the temporary folder of the system.
+
+A `jlog` that is killed cannot delete its folder. So before it makes a folder, `jlog` deletes the folders whose process no longer runs and that have not changed for an hour. The hour protects a run in a container that shares the temporary folder, because its process can look dead from outside the container. Each run also holds a lock on its folder, and the sweep leaves a folder whose lock is held. When another user has taken the name `jlog-<user ID>`, `jlog` makes its folder in the temporary folder itself and does not sweep.
+
+The tree objects go away with the folder. So the log keeps the ID of each tree, but `git ls-tree` cannot read a tree that was never committed.
+
+The copy of the real index keeps its record of each file, so git hashes only the files that changed. With a split index, each copy leaves a `sharedindex` file in `.git`, which git removes after two weeks. A tracked file that git ignores stays in the tree, as in a commit. When an entry of the real index is marked assume-unchanged or skip-worktree, git would not look at that file. Then `jlog` starts the temporary index with `git read-tree HEAD` instead, as the spec says.
 
 ## Sessions
 
