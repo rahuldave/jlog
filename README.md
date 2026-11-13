@@ -50,6 +50,12 @@ set shell := ["jlog", "bash", "-eu", "-o", "pipefail", "-c"]
 set shell := ["jlog", "python3", "-c"]
 ```
 
+**Use `pipefail` for lines with a pipe.** In `sh` without `pipefail`, a pipe fails only when its last command fails. So with `sh -cu`, the line `cargo test | tee out.txt` succeeds when the tests fail. The run log then records exit 0, and a gate counts the tests as passed. Some `sh`, such as dash on Debian and Ubuntu, has no `pipefail`, so use bash as the shell:
+
+```just
+set shell := ["jlog", "bash", "-euo", "pipefail", "-c"]
+```
+
 For any other form, the field `line` is null. A null line can make a gate fail, but a wrong line could make one pass. So `jlog` gives null in each of these cases:
 
 - **Options after the flag,** for example `sh -c -eu`.
