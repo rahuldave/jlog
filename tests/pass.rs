@@ -4,7 +4,7 @@
 mod common;
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 use common::{JLOG, records, run_log};
@@ -431,4 +431,158 @@ fn a_shell_with_joined_flags_and_pipefail_can_pass() {
     let out = just(r.path(), &["check"], &[]);
     assert!(out.status.success(), "{out:?}");
     assert_eq!(passes(r.path()).len(), 1);
+}
+
+/// The files in `dir` and its subfolders. A test compares the sets, not
+/// the counts, because git may pack or prune old objects meanwhile.
+fn files(dir: &Path) -> std::collections::BTreeSet<PathBuf> {
+    let mut out = std::collections::BTreeSet::new();
+    for e in fs::read_dir(dir).unwrap().flatten() {
+        if e.file_type().unwrap().is_dir() {
+            out.extend(files(&e.path()));
+        } else {
+            out.insert(e.path());
+        }
+    }
+    out
+}
+
+/// The files that are in `after` but not in `before`.
+fn new_files(
+    before: &std::collections::BTreeSet<PathBuf>,
+    after: &std::collections::BTreeSet<PathBuf>,
+) -> Vec<PathBuf> {
+    after.difference(before).cloned().collect()
+}
+
+#[test]
+fn a_run_leaves_no_temporary_folder_and_no_new_object() {
+    let r = repo(STEPS, &["lint"]);
+    fs::write(r.path().join("src.txt"), "an edit\n").unwrap();
+    fs::write(r.path().join("untracked.txt"), "new\n").unwrap();
+    let tmp = tempfile::tempdir().unwrap();
+    let before = files(&r.path().join(".git/objects"));
+    let out = just(
+        r.path(),
+        &["check"],
+        &[("TMPDIR", tmp.path().to_str().unwrap())],
+    );
+    assert!(!out.status.success(), "the unstaged edit fails the pass");
+    assert_eq!(records(r.path(), "tree").len(), 1);
+    assert_eq!(
+        new_files(&before, &files(&r.path().join(".git/objects"))),
+        Vec::<PathBuf>::new()
+    );
+    // Only the private folder of the user stays, and it is empty.
+    let mut top: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    top.sort();
+    let own = format!("jlog-{}", unsafe { libc::geteuid() });
+    assert_eq!(top, vec![own.clone()]);
+    let left: Vec<_> = fs::read_dir(tmp.path().join(own))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name())
+        .collect();
+    assert!(left.is_empty(), "{left:?}");
+}
+
+/// A `git` first in PATH that acts as git before 2.31: `rev-parse` prints
+/// the unknown flag `--path-format=absolute` back and gives relative paths.
+#[test]
+fn git_older_than_2_31_still_gives_the_tree() {
+    let r = repo(STEPS, &["lint"]);
+    let real = String::from_utf8(
+        Command::new("sh")
+            .args(["-c", "command -v git"])
+            .output()
+            .unwrap()
+            .stdout,
+    )
+    .unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let fake = bin.path().join("git");
+    fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nif [ \"$1\" = rev-parse ] && [ \"$2\" = --path-format=absolute ]; then\n  \
+             echo --path-format=absolute; shift 2; exec {real} rev-parse \"$@\"\nfi\nexec {real} \"$@\"\n",
+            real = real.trim()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&fake, fs::Permissions::from_mode(0o755)).unwrap();
+    // A file that git ignores, added with `-f` and not yet committed, is in
+    // the tree only when jlog starts from a copy of the real index.
+    fs::write(r.path().join(".git/info/exclude"), "ign\n").unwrap();
+    fs::write(r.path().join("ign"), "i\n").unwrap();
+    git(r.path(), &["add", "-f", "ign"]);
+    let path = format!(
+        "{}:{}",
+        bin.path().display(),
+        std::env::var("PATH").unwrap()
+    );
+    let out = just(r.path(), &["check"], &[("PATH", &path)]);
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(passes(r.path()).len(), 1);
+    let trees = records(r.path(), "tree");
+    assert_eq!(trees[0]["tree"], git(r.path(), &["write-tree"]));
+}
+
+/// In a shared /tmp, another user can take the name `jlog-<uid>` first.
+#[test]
+fn a_taken_private_folder_still_gives_the_tree() {
+    let r = repo(STEPS, &["lint"]);
+    let tmp = tempfile::tempdir().unwrap();
+    let own = tmp
+        .path()
+        .join(format!("jlog-{}", unsafe { libc::geteuid() }));
+    let elsewhere = tmp.path().join("elsewhere");
+    fs::create_dir(&elsewhere).unwrap();
+    std::os::unix::fs::symlink(&elsewhere, &own).unwrap();
+    let out = just(
+        r.path(),
+        &["check"],
+        &[("TMPDIR", tmp.path().to_str().unwrap())],
+    );
+    assert!(out.status.success(), "{out:?}");
+    assert_eq!(passes(r.path()).len(), 1);
+    assert_eq!(
+        fs::read_dir(tmp.path()).unwrap().count(),
+        2,
+        "no folder is left beside the link and its target"
+    );
+    assert_eq!(fs::read_dir(&elsewhere).unwrap().count(), 0);
+}
+
+/// A pre-commit hook gets `GIT_INDEX_FILE=.git/index`, relative to the top
+/// of the worktree, while `.agents` can sit in a subfolder.
+#[test]
+fn a_relative_index_from_a_hook_is_found_from_a_subfolder() {
+    let t = tempfile::tempdir().unwrap();
+    let top = t.path();
+    git(top, &["init", "-q"]);
+    fs::write(top.join("a"), "1\n").unwrap();
+    git(top, &["add", "a"]);
+    git(top, &["commit", "-q", "-m", "one"]);
+    let sub = top.join("sub");
+    fs::create_dir_all(sub.join(".agents")).unwrap();
+    fs::write(
+        sub.join("Justfile"),
+        format!("set shell := [\"{JLOG}\", \"sh\", \"-cu\"]\nx:\n  true\n"),
+    )
+    .unwrap();
+    // Only a copy of the real index holds this file: git ignores it.
+    fs::write(top.join(".git/info/exclude"), "ign\n.agents/log/\n").unwrap();
+    fs::write(top.join("ign"), "i\n").unwrap();
+    git(top, &["add", "-f", "ign"]);
+    git(top, &["add", "sub"]);
+    let out = just(&sub, &["x"], &[("GIT_INDEX_FILE", ".git/index")]);
+    assert!(out.status.success(), "{out:?}");
+    let trees = records(&sub, "tree");
+    assert_eq!(trees[0]["tree"], git(top, &["write-tree"]));
 }
