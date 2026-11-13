@@ -72,18 +72,34 @@ impl Session {
     /// other characters than letters, digits, `.`, `_` and `-` gets its hash
     /// in place of itself, so the name is always a plain file name.
     pub fn marker(&self) -> String {
-        let plain = self
-            .session
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
-        if plain && !self.session.starts_with('.') {
-            format!("{}-{}", self.harness, self.session)
-        } else {
-            use sha2::Digest;
-            let hash = sha2::Sha256::digest(self.session.as_bytes());
-            format!("{}-x{}", self.harness, hex(&hash[..16]))
-        }
+        marker_name(self.harness, &self.session)
     }
+}
+
+/// A plain file name for `id`, after `prefix` and `-`. An ID with other
+/// characters than letters, digits, `.`, `_` and `-`, or one that starts
+/// with `.`, gets `=` and its hash in place of itself. A plain ID has no
+/// `=`, so the two kinds of names never meet.
+pub fn marker_name(prefix: &str, id: &str) -> String {
+    let plain = id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-'));
+    if plain && !id.is_empty() && !id.starts_with('.') {
+        format!("{prefix}-{id}")
+    } else {
+        use sha2::Digest;
+        let hash = sha2::Sha256::digest(id.as_bytes());
+        format!("{prefix}={}", hex(&hash[..16]))
+    }
+}
+
+/// The run from `JLOG_RUN`, which the root Justfile exports, so the inner
+/// `just` calls of one `just check` share one run. None when it is unset.
+pub fn run_from_env() -> Option<String> {
+    let v = std::env::var_os("JLOG_RUN")?;
+    let v = v.to_string_lossy();
+    let v = v.trim();
+    (!v.is_empty()).then(|| v.chars().take(MAX_ID).collect())
 }
 
 /// The terminal session of this process: the process ID of the session
@@ -182,10 +198,7 @@ mod tests {
         assert_eq!(s.marker(), "codex-019a-ff.x_1");
         for bad in ["../../etc", ".hidden", "a/b", "a\u{0}b", "é"] {
             let m = detect(&[("CODEX_THREAD_ID", bad)]).marker();
-            assert!(
-                m.starts_with("codex-x") && m.len() == 39,
-                "{bad:?} gave {m}"
-            );
+            assert!(m.starts_with("codex=") && m.len() == 38, "{bad:?} gave {m}");
         }
         let long = "a".repeat(500);
         assert_eq!(detect(&[("CODEX_THREAD_ID", &long)]).session.len(), MAX_ID);

@@ -164,12 +164,81 @@ impl LogDir {
     /// Makes the marker `sessions/<name>`. True when this call made it, so
     /// only the first line of a session gets true, even in parallel.
     pub fn mark_session(&self, name: &str) -> io::Result<bool> {
-        let name = file_name(name)?;
-        let sessions = match openat(&self.dir, c"sessions", DIR_FLAGS, 0) {
-            Ok(d) => d,
-            Err(e) if e.kind() == io::ErrorKind::NotFound => subdir(&self.dir, c"sessions")?,
-            Err(e) => return Err(e),
+        self.mark(c"sessions", name)
+    }
+
+    /// Makes the marker `runs/<name>` for the first line of a run, and holds
+    /// a lock on it until the returned file is dropped. The marker appears
+    /// already locked: jlog locks a new file, then links it in place. A
+    /// later line of the run waits for that lock, so no line of the run
+    /// starts before the first line has logged the tree.
+    pub fn mark_run(&self, name: &str) -> io::Result<RunMark> {
+        use std::os::fd::AsRawFd;
+        let name_c = file_name(name)?;
+        let runs = self.folder(c"runs")?;
+        // Most lines are later lines, so try the marker first: two calls.
+        if let Ok(theirs) = openat(
+            &runs,
+            &name_c,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            0,
+        ) {
+            lock(&theirs, libc::LOCK_SH)?;
+            return Ok(RunMark::Later);
+        }
+        let tmp = file_name(&format!(".{name}.{}", std::process::id()))?;
+        // SAFETY: runs is an open folder and tmp is a valid C string. A
+        // missing file is the usual case, so the result is ignored.
+        unsafe { libc::unlinkat(runs.as_raw_fd(), tmp.as_ptr(), 0) };
+        let mine = openat(
+            &runs,
+            &tmp,
+            libc::O_RDONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW,
+            0o644,
+        )?;
+        lock(&mine, libc::LOCK_EX)?;
+        // SAFETY: as above. linkat fails when the name exists, and never
+        // replaces it.
+        let linked = unsafe {
+            libc::linkat(
+                runs.as_raw_fd(),
+                tmp.as_ptr(),
+                runs.as_raw_fd(),
+                name_c.as_ptr(),
+                0,
+            )
         };
+        let err = io::Error::last_os_error();
+        // SAFETY: as above.
+        unsafe { libc::unlinkat(runs.as_raw_fd(), tmp.as_ptr(), 0) };
+        if linked == 0 {
+            return Ok(RunMark::First(mine));
+        }
+        if err.kind() != io::ErrorKind::AlreadyExists {
+            return Err(err);
+        }
+        drop(mine);
+        let theirs = openat(
+            &runs,
+            &name_c,
+            libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_NONBLOCK,
+            0,
+        )?;
+        lock(&theirs, libc::LOCK_SH)?;
+        Ok(RunMark::Later)
+    }
+
+    fn folder(&self, folder: &std::ffi::CStr) -> io::Result<fs::File> {
+        match openat(&self.dir, folder, DIR_FLAGS, 0) {
+            Ok(d) => Ok(d),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => subdir(&self.dir, folder),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn mark(&self, folder: &std::ffi::CStr, name: &str) -> io::Result<bool> {
+        let name = file_name(name)?;
+        let sessions = self.folder(folder)?;
         match openat(
             &sessions,
             &name,
@@ -241,6 +310,29 @@ impl LogDir {
             unsafe { libc::unlinkat(self.dir.as_raw_fd(), tmp.as_ptr(), 0) };
         }
         renamed
+    }
+}
+
+/// The marker of a run.
+pub enum RunMark {
+    /// The first line of the run. The lock holds until this file is dropped.
+    First(fs::File),
+    /// A later line. The first line has finished its tree.
+    Later,
+}
+
+/// Takes a lock with flock, and waits for it, through signals.
+fn lock(f: &fs::File, how: i32) -> io::Result<()> {
+    use std::os::fd::AsRawFd;
+    loop {
+        // SAFETY: f is an open file.
+        if unsafe { libc::flock(f.as_raw_fd(), how) } == 0 {
+            return Ok(());
+        }
+        let e = io::Error::last_os_error();
+        if e.kind() != io::ErrorKind::Interrupted {
+            return Err(e);
+        }
     }
 }
 
@@ -548,6 +640,34 @@ mod tests {
             find_root_with(&proj, None, &parents, &[]),
             Some(proj.clone())
         );
+    }
+
+    #[test]
+    fn a_later_line_of_a_run_waits_for_the_first() {
+        let t = tempfile::tempdir().unwrap();
+        fs::create_dir(t.path().join(".agents")).unwrap();
+        let dir = LogDir::open(t.path(), None).unwrap();
+        let RunMark::First(held) = dir.mark_run("run-a").unwrap() else {
+            panic!("the first call is the first line");
+        };
+        let root = t.path().to_path_buf();
+        let start = std::time::Instant::now();
+        let later = std::thread::spawn(move || {
+            let dir = LogDir::open(&root, None).unwrap();
+            matches!(dir.mark_run("run-a").unwrap(), RunMark::Later)
+        });
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(held);
+        assert!(later.join().unwrap());
+        assert!(
+            start.elapsed() >= std::time::Duration::from_millis(300),
+            "the later line waited"
+        );
+        let names: Vec<_> = fs::read_dir(t.path().join(".agents/log/runs"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name())
+            .collect();
+        assert_eq!(names, ["run-a"], "no temporary file is left");
     }
 
     #[test]

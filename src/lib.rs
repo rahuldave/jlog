@@ -8,16 +8,20 @@ pub mod capped;
 pub mod commands;
 pub mod env;
 pub mod logdir;
+pub mod pass;
 pub mod proc;
 pub mod redact;
 pub mod session;
 pub mod shell;
 pub mod time;
+pub mod tree;
 
 pub const USAGE: &str = "\
 usage: jlog <shell> <flags> <line> [args...]
        jlog session | env | tools
        jlog skip <step> <reason>
+       jlog step <step>
+       jlog pass
 
 Runs <line> with <shell> and adds one JSON line to .agents/log/just.jsonl.
 A Justfile sets it as its shell:
@@ -25,7 +29,8 @@ A Justfile sets it as its shell:
     set shell := [\"jlog\", \"sh\", \"-cu\"]
 
 The commands log the session, the environment, the versions of the tools,
-or a step that has nothing to do, and print what they log.
+a step that has nothing to do, the end of a step that passed, or the pass
+of `just check`, and print what they log.
 ";
 
 /// Runs jlog with the arguments after the program name, and returns the exit code.

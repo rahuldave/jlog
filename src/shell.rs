@@ -31,6 +31,18 @@ pub struct Line {
     pub session: crate::session::Session,
 }
 
+/// The record that the first line of a run logs before it runs: the
+/// worktree tree, or null when git could not compute it.
+#[derive(Serialize)]
+struct TreeRecord<'a> {
+    kind: &'static str,
+    run: &'a str,
+    tree: Option<String>,
+    time: String,
+    #[serde(flatten)]
+    session: crate::session::Session,
+}
+
 /// The index of the line in the arguments after the shell, or None when
 /// jlog cannot be sure. A null line can only make a gate fail, while a wrong
 /// line could make it pass, so jlog knows a short list of forms and gives
@@ -62,6 +74,24 @@ pub fn line_index(shell: &std::ffi::OsStr, after_shell: &[OsString]) -> Option<u
             Kind::Python => None,
             _ => a.strip_prefix('+'),
         })?;
+        // A group can end with an option that takes the next argument, as
+        // in `-euo pipefail`. The letters before it must be safe, with no c.
+        if kind != Kind::Python
+            && group.len() > 1
+            && let Some(last) = group.chars().last().filter(|c| matches!(c, 'o' | 'O'))
+        {
+            let head = &group[..group.len() - 1];
+            let opt = format!("{}{last}", &a[..1]);
+            if head.contains('c')
+                || !head.bytes().all(|b| kind.safe(b))
+                || !kind.takes_value(&opt)
+                || !kind.safe_value(&opt, arg(i + 1)?)
+            {
+                return None;
+            }
+            i += 2;
+            continue;
+        }
         if group.is_empty() || !group.bytes().all(|b| kind.safe(b)) {
             return None;
         }
@@ -207,6 +237,9 @@ pub fn run(args: &[OsString]) -> i32 {
     // Before the spawn, so that no signal is lost. exec sets a caught signal
     // back to its default action, so the shell is not affected.
     catch_signals();
+    // The log folder and the run are found before the line runs, so the
+    // first line of a run can log the tree as it was before the line.
+    let before = Before::find();
     let mut started = false;
     let code = match Command::new(shell).args(rest).spawn() {
         Ok(mut child) => {
@@ -241,7 +274,9 @@ pub fn run(args: &[OsString]) -> i32 {
     DONE.store(true, Ordering::SeqCst);
     let end = SystemTime::now();
 
-    log(shell, rest, code.number(), start, end, started);
+    if let Some(before) = before {
+        log(before, shell, rest, code.number(), start, end, started);
+    }
     // A signal after the shell ended, during the logging, stops jlog with
     // that signal, unless the shell itself ended by a signal.
     let late = PENDING.swap(0, Ordering::SeqCst);
@@ -373,7 +408,83 @@ fn catch_signals() {
     set(libc::SIGQUIT, ignore);
 }
 
+/// What jlog finds before the line runs.
+struct Before {
+    root: std::path::PathBuf,
+    dir: std::io::Result<logdir::LogDir>,
+    argv: Vec<String>,
+    run: String,
+    kind: &'static str,
+}
+
+impl Before {
+    /// None when there is no log folder, so the line logs nothing.
+    fn find() -> Option<Before> {
+        let cwd = std::env::current_dir().ok()?;
+        let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
+        let root = logdir::find_root(&cwd, home.as_deref())?;
+        // SAFETY: getppid has no preconditions.
+        let parent = unsafe { libc::getppid() };
+        // `just` runs its shell itself, so in the shell form only the parent
+        // counts, not a `just` higher up. Outside `just`, the run is the
+        // parent, and the argv stays empty: the command line of another
+        // program can hold a secret that is not in the environment.
+        let parent_info = proc::info(parent);
+        let since = parent_info.as_ref().map_or(0, |p| p.start);
+        let argv = match &parent_info {
+            Some(p) if p.name == "just" => proc::argv(parent).unwrap_or_default(),
+            _ => Vec::new(),
+        };
+        let run = crate::session::run_from_env().unwrap_or_else(|| format!("{parent}-{since}"));
+        let dir = logdir::LogDir::open(&root, home.as_deref());
+        // A backtick never takes the run, because the backticks of the outer
+        // `just` do not get the exported JLOG_RUN, and so make a run of
+        // their own.
+        let kind = if proc::stdout_is_own_pipe(parent) {
+            "backtick"
+        } else {
+            "line"
+        };
+        // The first line of a run logs the tree. A set JLOG_RUN cannot reuse
+        // an old run of another tree, because `jlog pass` compares this tree.
+        let mark = match &dir {
+            Ok(d) if kind == "line" => Some(d.mark_run(&crate::session::marker_name("run", &run))),
+            _ => None,
+        };
+        match (mark, &dir) {
+            (Some(Ok(logdir::RunMark::First(held))), Ok(d)) => {
+                // The tree goes into the log before the lock goes, so no
+                // later line of the run starts before it. The lock goes
+                // before the line runs, because the line can be an inner
+                // `just` call, whose lines are later lines of this run.
+                let record = TreeRecord {
+                    kind: "tree",
+                    run: &run,
+                    tree: crate::tree::worktree_tree(&root).ok(),
+                    time: time::utc(SystemTime::now()),
+                    session: crate::session::Session::detect(),
+                };
+                let json = serde_json::to_string(&record).expect("a record always serializes");
+                if let Err(e) = d.append(&json) {
+                    warn(format_args!("could not log the tree of the run: {e}"));
+                }
+                drop(held);
+            }
+            (Some(Err(e)), _) => warn(format_args!("could not mark the run: {e}")),
+            _ => {}
+        }
+        Some(Before {
+            root,
+            dir,
+            argv,
+            run,
+            kind,
+        })
+    }
+}
+
 fn log(
+    before: Before,
     shell: &std::ffi::OsStr,
     after_shell: &[OsString],
     exit: i32,
@@ -381,32 +492,13 @@ fn log(
     end: SystemTime,
     started: bool,
 ) {
-    let Ok(cwd) = std::env::current_dir() else {
-        return;
-    };
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let Some(root) = logdir::find_root(&cwd, home.as_deref()) else {
-        return;
-    };
-
-    // SAFETY: getppid has no preconditions.
-    let parent = unsafe { libc::getppid() };
-    // `just` runs its shell itself, so in the shell form only the parent
-    // counts, not a `just` higher up. Outside `just`, the run is the parent,
-    // and the argv stays empty: the command line of another program can
-    // hold a secret that is not in the environment.
-    let parent_info = proc::info(parent);
-    let since = parent_info.as_ref().map_or(0, |p| p.start);
-    let argv = match &parent_info {
-        Some(p) if p.name == "just" => proc::argv(parent).unwrap_or_default(),
-        _ => Vec::new(),
-    };
-    let run = format!("{parent}-{since}");
-    let kind = if proc::stdout_is_own_pipe(parent) {
-        "backtick"
-    } else {
-        "line"
-    };
+    let Before {
+        root,
+        dir,
+        argv,
+        run,
+        kind,
+    } = before;
 
     let secrets = redact::secrets(std::env::vars_os());
     // A shell that did not start ran no line, so the line is null.
@@ -424,7 +516,7 @@ fn log(
         session: crate::session::Session::detect(),
     };
     let json = serde_json::to_string(&entry).expect("a Line always serializes");
-    let written = logdir::LogDir::open(&root, home.as_deref()).and_then(|dir| {
+    let written = dir.and_then(|dir| {
         dir.append(&json)?;
         // The first line of a session also logs the session, the environment
         // and the tools. Their failure never fails the line.
@@ -482,6 +574,10 @@ mod tests {
             Some(4)
         );
         assert_eq!(idx_for("python3", &["-X", "dev", "-c", "x"]), Some(3));
+        assert_eq!(idx_for("bash", &["-euo", "pipefail", "-c", "x"]), Some(3));
+        assert_eq!(idx_for("bash", &["-eO", "extglob", "-c", "x"]), Some(3));
+        assert_eq!(idx_for("sh", &["+eo", "xtrace", "-c", "x"]), Some(3));
+        assert_eq!(idx_for("zsh", &["-eo", "pipefail", "-c", "x"]), Some(3));
         let bash = ["-o", "errexit", "+o", "xtrace", "-c", "x"];
         assert_eq!(idx_for("bash", &bash), Some(5));
         assert_eq!(
@@ -495,6 +591,13 @@ mod tests {
     fn every_doubtful_form_gives_no_line() {
         let none: &[(&str, &[&str])] = &[
             // Shells that jlog does not know.
+            // A joined option with a bad value, a c before it, or no value.
+            ("bash", &["-euo", "noexec", "-c", "x"]),
+            ("bash", &["-cuo", "pipefail", "x"]),
+            ("bash", &["-euo"]),
+            ("bash", &["-no", "pipefail", "-c", "x"]),
+            ("sh", &["-eO", "extglob", "-c", "x"]),
+            ("python3", &["-uo", "x", "-c", "y"]),
             ("pwsh", &["-Command", "x"]),
             ("cmd", &["/C", "dir"]),
             ("node", &["-e", "x"]),
@@ -504,7 +607,6 @@ mod tests {
             ("bash", &["-c", "-eo", "pipefail", "x"]),
             ("bash", &["-c", "-", "x"]),
             ("sh", &["-c", "--", "x"]),
-            ("bash", &["-eo", "pipefail", "-c", "x"]),
             ("bash", &["-oerrexit", "-c", "x"]),
             // A line that the sh family would read as an option.
             ("bash", &["-c", "-x date", "echo name"]),

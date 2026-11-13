@@ -379,7 +379,8 @@ fn a_bad_skip_is_a_usage_error() {
 fn a_command_outside_a_project_prints_and_passes() {
     let t = tempfile::tempdir().unwrap();
     fs::create_dir(t.path().join(".git")).unwrap();
-    let out = run(common::cmd(JLOG).args(["skip", "lint", "none"]), t.path());
+    let out = as_recipe_line(t.path(), &["skip", "lint", "none"], &[]);
+    assert!(out.status.success(), "{out:?}");
     let v: Value = serde_json::from_slice(&out.stdout).unwrap();
     assert_eq!(v["step"], "lint");
     assert!(!t.path().join(".agents").exists());
@@ -389,12 +390,8 @@ fn a_command_outside_a_project_prints_and_passes() {
 fn a_command_that_cannot_write_the_log_fails() {
     let p = project();
     fs::create_dir_all(p.path().join(".agents/log/just.jsonl")).unwrap();
-    let out = common::cmd(JLOG)
-        .args(["skip", "lint", "none"])
-        .current_dir(p.path())
-        .output()
-        .unwrap();
-    assert_eq!(out.status.code(), Some(1));
+    let out = as_recipe_line(p.path(), &["skip", "lint", "none"], &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
 }
 
 #[test]
@@ -413,13 +410,12 @@ fn with_arguments_a_command_name_is_a_shell() {
 #[test]
 fn a_skip_redacts_a_secret_in_the_step() {
     let p = project();
-    let out = common::cmd(JLOG)
-        .args(["skip", "tokFAKE0123456789", "r"])
-        .env("FAKE_TOKEN", "tokFAKE0123456789")
-        .current_dir(p.path())
-        .output()
-        .unwrap();
-    assert!(out.status.success());
+    let out = as_recipe_line(
+        p.path(),
+        &["skip", "tokFAKE0123456789", "r"],
+        &[("FAKE_TOKEN", "tokFAKE0123456789")],
+    );
+    assert!(out.status.success(), "{out:?}");
     assert!(!String::from_utf8_lossy(&out.stdout).contains("tokFAKE"));
     assert_eq!(records(p.path(), "skip")[0]["step"], "<redacted>");
 }
@@ -529,4 +525,30 @@ fn install_plugins_makes_each_environment_where_jlog_looks() {
         }
     }
     assert!(!elsewhere.exists());
+}
+
+/// Runs `jlog <args>` as the one line of a recipe, with a real `just`. The
+/// tests may run under `just check`, and there `jlog skip` refuses to run
+/// unless it is the line itself.
+fn as_recipe_line(dir: &Path, args: &[&str], env: &[(&str, &str)]) -> Output {
+    let jf = tempfile::NamedTempFile::new().unwrap();
+    let mut line = format!("'{JLOG}'");
+    for a in args {
+        line.push_str(&format!(" '{a}'"));
+    }
+    fs::write(
+        jf.path(),
+        format!("set shell := [\"{JLOG}\", \"sh\", \"-cu\"]\nx:\n  {line}\n"),
+    )
+    .unwrap();
+    let mut c = common::cmd("just");
+    c.arg("--justfile")
+        .arg(jf.path())
+        .arg("--working-directory")
+        .arg(dir)
+        .arg("x");
+    for (k, v) in env {
+        c.env(k, v);
+    }
+    c.output().unwrap()
 }
