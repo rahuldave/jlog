@@ -124,7 +124,7 @@ The tree objects go away with the folder. So the log keeps the ID of each tree, 
 
 The copy of the real index keeps its mtime. git looks again at each file that is not older than the index, so a change in the same second still counts.
 
-The copy of the real index keeps its record of each file, so git hashes only the files that changed. With a split index, each copy leaves a `sharedindex` file in `.git`, which git removes after two weeks. A tracked file that git ignores stays in the tree, as in a commit. When an entry of the real index is marked assume-unchanged or skip-worktree, git would not look at that file. Then `jlog` starts the temporary index with `git read-tree HEAD` instead, as the spec says.
+The copy of the real index keeps its record of each file, so git hashes only the files that changed. With a split index, `jlog` writes the copy as one whole index, so it leaves no new `sharedindex` file in `.git`. A tracked file that git ignores stays in the tree, as in a commit. When an entry of the real index is marked assume-unchanged or skip-worktree, git would not look at that file. Then `jlog` starts the temporary index with `git read-tree HEAD` instead, as the spec says.
 
 ## Sessions
 
