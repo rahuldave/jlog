@@ -26,6 +26,9 @@ pub fn worktree_tree(root: &Path) -> Result<String, String> {
     let index = temp.0.join("index");
     let git = |args: &[&str]| -> Result<String, String> {
         let out = Command::new("git")
+            // A split index would write a new `sharedindex.*` into `.git` for
+            // the copy. `-c` works on every git, unlike GIT_CONFIG_COUNT.
+            .args(["-c", "core.splitIndex=false"])
             .args(args)
             .current_dir(root)
             .env("GIT_INDEX_FILE", &index)
@@ -443,6 +446,37 @@ mod tests {
             git(d, &["write-tree"]),
             "only the copy of the index holds the force-added file"
         );
+    }
+
+    /// With a split index, git writes a new `sharedindex.*` into `.git`
+    /// each time it writes a split index, also for the copy.
+    #[test]
+    fn a_split_index_leaves_no_shared_index_in_the_repository() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q"]);
+        git(d, &["config", "core.splitIndex", "true"]);
+        fs::write(d.join("a"), "1").unwrap();
+        git(d, &["add", "a"]);
+        git(d, &["commit", "-q", "-m", "one"]);
+        fs::write(d.join("a"), "2").unwrap();
+        fs::write(d.join("b"), "new").unwrap();
+        let shared = |d: &Path| -> Vec<String> {
+            let mut v: Vec<String> = fs::read_dir(d.join(".git"))
+                .unwrap()
+                .flatten()
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .filter(|n| n.starts_with("sharedindex."))
+                .collect();
+            v.sort();
+            v
+        };
+        let before = shared(d);
+        assert!(!before.is_empty(), "the repository has a split index");
+        let tree = worktree_tree(d).unwrap();
+        assert_eq!(shared(d), before);
+        git(d, &["add", "-A"]);
+        assert_eq!(tree, git(d, &["write-tree"]));
     }
 
     #[test]
