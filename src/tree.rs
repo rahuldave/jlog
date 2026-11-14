@@ -43,9 +43,7 @@ pub fn worktree_tree(root: &Path) -> Result<String, String> {
         Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
     };
     let real = real_index(root);
-    let copied = real
-        .as_ref()
-        .is_some_and(|r| std::fs::copy(r, &index).is_ok());
+    let copied = real.as_ref().is_some_and(|r| copy_index(r, &index).is_ok());
     let flagged = copied && git(&["ls-files", "-v"]).map_or(true, |l| has_flags(&l));
     if !copied || flagged {
         let _ = std::fs::remove_file(&index);
@@ -61,6 +59,21 @@ pub fn worktree_tree(root: &Path) -> Result<String, String> {
     } else {
         Err(format!("git write-tree gave {tree:?}"))
     }
+}
+
+/// Copies the index and keeps its mtime. git looks again at each file whose
+/// mtime is not older than the index, because a change in that second has
+/// the same stat. A copy with a newer mtime would make such a change look
+/// clean, so `git add` would leave it out of the tree. On Linux `fs::copy`
+/// gives the copy a new mtime; on macOS it happens to keep it.
+fn copy_index(from: &Path, to: &Path) -> std::io::Result<()> {
+    // Read the mtime first. If git writes the index between the two steps,
+    // the copy gets an older mtime, so git looks again at more files.
+    let modified = std::fs::metadata(from)?.modified()?;
+    std::fs::copy(from, to)?;
+    // Setting the times needs only ownership, and the copy keeps the mode of
+    // the index, which can be read-only, so open it read-only.
+    std::fs::File::open(to)?.set_modified(modified)
 }
 
 /// The value of `GIT_ALTERNATE_OBJECT_DIRECTORIES` for the temporary store:
@@ -372,6 +385,64 @@ mod tests {
         git(d, &["add", "-A"]);
         git(d, &["add", "-f", "gen.txt"]);
         assert_eq!(tree, git(d, &["write-tree"]));
+    }
+
+    fn set_mtime(path: &Path, t: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// git looks again at a file whose mtime is not older than the index,
+    /// because it may have changed in the same second. The copy of the index
+    /// must keep that mtime, or a change of the same size in that second
+    /// looks clean and drops out of the tree.
+    #[test]
+    fn a_change_in_the_second_of_the_index_is_in_the_tree() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q"]);
+        // Many git builds compare the ctime only to the second, so a write in
+        // the same second keeps it. Turning it off makes the test the same on
+        // every build.
+        git(d, &["config", "core.trustctime", "false"]);
+        let then = SystemTime::now() - Duration::from_secs(10);
+        fs::write(d.join("a.txt"), "aaa").unwrap();
+        set_mtime(&d.join("a.txt"), then);
+        git(d, &["add", "a.txt"]);
+        set_mtime(&d.join(".git/index"), then);
+        fs::write(d.join("a.txt"), "bbb").unwrap();
+        set_mtime(&d.join("a.txt"), then);
+        let tree = worktree_tree(d).unwrap();
+        git(d, &["add", "a.txt"]);
+        assert_eq!(tree, git(d, &["write-tree"]), "the tree holds bbb");
+        let blob = git(d, &["rev-parse", &format!("{tree}:a.txt")]);
+        assert_eq!(git(d, &["cat-file", "blob", &blob]), "bbb");
+    }
+
+    /// git writes the index through a lock file and a rename, so a
+    /// read-only index still works, and its copy must too.
+    #[test]
+    fn a_read_only_index_is_still_copied() {
+        use std::os::unix::fs::PermissionsExt;
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q"]);
+        fs::write(d.join(".gitignore"), "*.log\n").unwrap();
+        git(d, &["add", ".gitignore"]);
+        git(d, &["commit", "-q", "-m", "one"]);
+        fs::write(d.join("kept.log"), "k").unwrap();
+        git(d, &["add", "-f", "kept.log"]);
+        fs::set_permissions(d.join(".git/index"), fs::Permissions::from_mode(0o444)).unwrap();
+        let tree = worktree_tree(d).unwrap();
+        assert_eq!(
+            tree,
+            git(d, &["write-tree"]),
+            "only the copy of the index holds the force-added file"
+        );
     }
 
     #[test]
