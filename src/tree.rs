@@ -374,6 +374,42 @@ mod tests {
         assert_eq!(tree, git(d, &["write-tree"]));
     }
 
+    fn set_mtime(path: &Path, t: SystemTime) {
+        fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(t)
+            .unwrap();
+    }
+
+    /// git looks again at a file whose mtime is not older than the index,
+    /// because it may have changed in the same second. The copy of the index
+    /// must keep that mtime, or a change of the same size in that second
+    /// looks clean and drops out of the tree.
+    #[test]
+    fn a_change_in_the_second_of_the_index_is_in_the_tree() {
+        let t = tempfile::tempdir().unwrap();
+        let d = t.path();
+        git(d, &["init", "-q"]);
+        // Many git builds compare the ctime only to the second, so a write in
+        // the same second keeps it. Turning it off makes the test the same on
+        // every build.
+        git(d, &["config", "core.trustctime", "false"]);
+        let then = SystemTime::now() - Duration::from_secs(10);
+        fs::write(d.join("a.txt"), "aaa").unwrap();
+        set_mtime(&d.join("a.txt"), then);
+        git(d, &["add", "a.txt"]);
+        set_mtime(&d.join(".git/index"), then);
+        fs::write(d.join("a.txt"), "bbb").unwrap();
+        set_mtime(&d.join("a.txt"), then);
+        let tree = worktree_tree(d).unwrap();
+        git(d, &["add", "a.txt"]);
+        assert_eq!(tree, git(d, &["write-tree"]), "the tree holds bbb");
+        let blob = git(d, &["rev-parse", &format!("{tree}:a.txt")]);
+        assert_eq!(git(d, &["cat-file", "blob", &blob]), "bbb");
+    }
+
     #[test]
     fn a_file_marked_assume_unchanged_still_counts() {
         let t = tempfile::tempdir().unwrap();
