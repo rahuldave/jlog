@@ -61,6 +61,7 @@ prose-check:
 # Measure the time that jlog adds to each line
 bench: build
     bash scripts/bench.sh target/release/jlog
+    bash scripts/bench.sh target/release/jlog 500 10 scope
 
 # The plugins go before the tests, so their environments exist when the labs run them.
 

@@ -4,7 +4,9 @@
 
 `just` has no log of its own. So a Justfile sets `jlog` as its shell, and `jlog` runs each line with the real shell. Then it adds one JSON line to the run log, `.agents/log/just.jsonl`.
 
-The shell form, the commands `session`, `env`, `tools`, `skip`, `step` and `pass`, and the plugins for Claude Code and Codex work now.
+Before it runs anything, `jlog` also sets the PATH and the environment of the project, from the `.jlog` folders above the current folder. So each recipe line, and each program that it starts, finds the tools of the project first.
+
+The shell form, the commands `run`, `path`, `session`, `env`, `tools`, `skip`, `step` and `pass`, and the plugins for Claude Code and Codex work now.
 
 ## Terms
 
@@ -21,6 +23,8 @@ The shell form, the commands `session`, `env`, `tools`, `skip`, `step` and `pass
 | Session | One session of a harness, or one terminal session of a person. |
 | Fresh agent | An agent that a harness starts for one task, inside the session of its parent. |
 | Plugin | A small Python program for one harness. It finds the transcript and the model of the session. |
+| Scope | A folder that holds `.jlog/bin` or `.jlog/environment.json`. It gives the tools and the variables of the folders below it. |
+| User defaults | The folder `$XDG_DATA_HOME/jlog/bin` and the file `$XDG_CONFIG_HOME/jlog/environment.json`. They apply after every scope. |
 
 ## Install
 
@@ -89,6 +93,100 @@ Each line of a recipe then adds a line like this one to the run log:
 
 A recipe with a shebang line, or with the attribute `[script]`, does not use the shell of the Justfile. So its lines do not run through `jlog`, and the run log does not show them. The lint of the stack finds such recipes.
 
+## The PATH and the environment
+
+Each call of `jlog` first resolves its PATH and its environment, and then runs. The call can be a recipe line, `jlog run`, or a command such as `jlog env`. The programs that `jlog` itself starts, such as git, the plugins and the version probes, get the same environment.
+
+`jlog` goes up from the current folder and collects the scopes. It does not call git, and it needs no `.agents` folder. The search:
+
+- **Crosses the top of a repository.** A workspace folder above several repositories can hold tools for all of them.
+- **Never looks at a sibling folder.** Only the current folder and the folders above it count.
+- **Stops after a scope with `"root": true`.** The folders above that scope do not count.
+- **Stops before a home folder or the root of the file system.** The rule for a home folder is the one of the section "How jlog finds the log folder".
+- **Stops at a folder that every user can write to,** such as `/tmp`. Anyone could put a `.jlog` there.
+- **Stops at a scope that another user owns.** The folder `.jlog`, its `bin` and its file must belong to you or to root, and not every user may write to them. A group may write, as git allows. `jlog` warns on stderr and uses no scope from there up, since the skipped one might have said `"root": true`. The user folders follow the same rule.
+
+The PATH then has these entries, in this order:
+
+1. The `.jlog/bin` of the nearest scope, then the folders in its `path` list, in their order.
+2. The same for each scope above it, nearest first.
+3. `$XDG_DATA_HOME/jlog/bin`, then the folders in the `path` list of the user file.
+4. The PATH that `jlog` got, in its order.
+
+`jlog` makes each entry absolute, skips a folder that does not exist, and adds each folder once. A folder that the inherited PATH holds already also keeps its place there, so it can appear twice. When you leave the project, the PATH is again the one you had. It adds no empty entry. A command given with a path, such as `/bin/sh`, keeps its meaning.
+
+### The file .jlog/environment.json
+
+The file holds data only. This example puts a Python and a Node folder in the PATH, and gives Rust its own folders:
+
+```json
+{
+  "version": 1,
+  "root": false,
+  "path": [".venv/bin", "node_modules/.bin"],
+  "env": {
+    "CARGO_HOME": {"path": ".jlog/cargo"},
+    "RUSTUP_HOME": {"path": ".jlog/rustup"}
+  }
+}
+```
+
+| Key | Meaning |
+|---|---|
+| `version` | Must be `1`. Another number stops `jlog` with an error. |
+| `root` | True to stop the search at this scope. False by default. |
+| `path` | A list of folders for the PATH. A relative folder is based on the scope, the folder that holds `.jlog`. |
+| `env` | The variables to set. A value is a string, or an object with one key, `path`. A `path` value is made absolute, even when the folder does not exist yet. |
+
+The user file, `$XDG_CONFIG_HOME/jlog/environment.json`, has the same keys, but each path in it must be absolute. When `XDG_DATA_HOME` or `XDG_CONFIG_HOME` is unset, empty or relative, `jlog` uses `~/.local/share` or `~/.config`. With no absolute folder and no absolute `HOME`, `jlog` leaves out that user folder.
+
+For a variable, the nearest declaration wins. `jlog` applies the user file first, then the outer scopes, then the inner ones. A file cannot set `PATH`, `HOME`, `XDG_DATA_HOME`, `XDG_CONFIG_HOME`, any `JLOG_` variable, or the session variables of Claude Code and Codex. `jlog` reads `HOME` and the XDG folders to resolve, so a change to them would make a nested call resolve in another way.
+
+`jlog` stops with exit code 2 before it runs anything when a file is not valid. The error names the file and the key, and never a value. Examples are bad JSON, an unknown key, another version or a reserved name.
+
+`jlog` never installs a tool, reads the cache of a package manager or sources an activation script. It adds a `.venv` or a `node_modules` folder only when a file names it. It does not guess the folder of a Rust toolchain, so `rustup` still picks the toolchain.
+
+### Moving between projects
+
+`jlog` keeps a record of what it added in the variable `JLOG_RESOLVED`. The next call takes back only that, and then resolves again. Suppose an agent starts in project A and then runs `jlog` in project B:
+
+- The `.jlog/bin` of A leaves the PATH, and the one of B comes in.
+- A variable that A set and the caller did not change goes back to its old value, or is unset.
+- A change that the caller made after the first call stays.
+
+A call in the same folder changes nothing, so nested calls are safe.
+
+`JLOG_RESOLVED` holds the old values that `jlog` will put back, and these can be secrets. So the redaction of the run log treats each value in it as a secret too. If the caller sets a variable to the exact value that a scope set, `jlog` cannot tell the two apart, and takes the value back on a move.
+
+The PATH of a program does not change when it moves to another folder. A program started by `jlog run` keeps its environment until it calls `jlog` again. Each line of a recipe calls `jlog` again, so it resolves for the folder of that recipe. A worker on another machine needs its own setup.
+
+### jlog run and jlog path
+
+`jlog run <command> [args...]` resolves, then runs the command in place of `jlog`. So a recipe shell named `run` no longer works, as for the other command names. The command keeps its exit code, its signals and its terminal, and no line goes into the run log. A missing command exits with 127.
+
+`jlog path` prints the scopes, the user folders, the PATH order and the names of the variables, and where each comes from. It prints a path value, but never the value of a string variable. It runs nothing.
+
+### Start an agent through just
+
+A recipe can start an agent, so the agent and each program that it starts find the tools of the project:
+
+```just
+set shell := ["jlog", "sh", "-cu"]
+
+agent:
+    unset JLOG_RUN; exec claude
+```
+
+The first `just` and `jlog` must be in the PATH already. The recipe unsets `JLOG_RUN`, so each `just check` that the agent runs later gets its own run ID. The inner recipes of one check still share its run.
+
+A shebang recipe or a script recipe does not go through the shell of the Justfile. Such a recipe needs a PATH that is ready already, or a call of `jlog run`.
+
+`jagt` returns the text of a task, and gives no environment to the agent that takes it. An agent started through the recipe has the environment before it gets any task.
+
+### Later work
+
+`jnterfaces` will fill `.jlog/bin` and write `.jlog/environment.json` from the profiles of a project. This version of `jlog` does not do that work. The format of the file above is the interface that `jnterfaces` will write.
+
 ## Runs
 
 The root Justfile exports one run ID, so that the inner `just` calls of one `just check` share one run:
@@ -148,6 +246,8 @@ A command takes the run from `JLOG_RUN`, or else from the nearest `just` above i
 
 | Command | What it logs |
 |---|---|
+| `jlog run <command>` | Nothing. It resolves the environment and runs the command in place of `jlog`. |
+| `jlog path` | Nothing. It prints the scopes and the PATH order, and runs nothing. |
 | `jlog session` | The fields `transcript`, `model` and `parent`, from the plugin of the harness. A terminal has no plugin. |
 | `jlog env` | The name of each variable, and its value only for the safe list of the section "Secrets". Each other value shows as `redacted`. |
 | `jlog tools` | The version of each program of the tools table of the spec, with `--version`. |
@@ -267,6 +367,8 @@ An argument of a recipe is in the environment only with `set export` or `set dot
 On 2026-11-12, on the machine of the author, `jlog` added 4.1 to 4.5 ms to each line. A small C program that only starts the shell and waits for it added 1.9 to 2.3 ms. So the start of one more process takes about half of the time. The machine was busy during the test, with a load average of 5 to 16, and an earlier run at a load of 6 to 9 gave 2.7 to 3.6 ms.
 
 The work of `jlog` itself takes about 1.8 to 2.2 ms of that time. It finds the folder, reads the argv, finds the session and the run, redacts and writes. The marker of the run and its lock add no CPU time that a test of 1,000 lines could measure. The bench runs as a terminal session with a home folder of its own, and its best round leaves out the first line of the session.
+
+On 2026-11-17, the resolution of the PATH added no time that the bench could measure, in a folder with no scope. Three rounds gave 2.91 to 2.99 ms for each line, and version 0.1.1 gave 2.98 to 3.03 ms. With one scope that has a file, two `path` folders and two variables, the time was 3.22 to 3.43 ms for each line. The second command of `just bench` measures that case.
 
 The first line of each run also computes the worktree tree. That takes one `git add -A` on a copy of the index, so its cost grows with the changed files, not with the whole repository.
 
