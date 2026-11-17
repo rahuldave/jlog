@@ -383,6 +383,8 @@ one JSON line to the run log:
 | Command | What it logs |
 |---|---|
 | `jlog <shell> <flags> <line>` | One line of a recipe. `just` calls this form. |
+| `jlog run <command>` | Nothing. It runs the command with the resolved environment, in place of `jlog`. |
+| `jlog path` | Nothing. It prints the scopes and the PATH order. |
 | `jlog session` | The harness, the session ID, the path of the transcript and the model. |
 | `jlog env` | The environment. |
 | `jlog tools` | The version of each program in the tools table. |
@@ -396,6 +398,14 @@ one JSON line to the run log:
   starts no download, and its failure never fails the line.
 - **The gate is a plain script, not a recipe.** So nothing runs on its own
   inside the git hook.
+
+**The PATH of each call.** Before it runs anything, `jlog` resolves the
+PATH and the environment from the `.jlog` scopes above the current folder and
+the user defaults under the XDG folders. The README of jlog gives the rules,
+in its section "The PATH and the environment". The resolution calls no git
+and writes no file, so it comes before the tree record, and git, the plugins
+and the probes get the resolved PATH. `jnterfaces` will write the files of
+the scopes from the profiles. That work is still to come.
 
 **Which session.** Each harness shows its session in a different way:
 

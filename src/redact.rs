@@ -32,8 +32,17 @@ where
     let mut out: Vec<String> = vars
         .into_iter()
         .filter(|(k, _)| !k.as_ref().to_str().is_some_and(|k| SAFE.contains(&k)))
+        // The record of the resolver holds old values of variables, which
+        // are secrets too.
+        .flat_map(|(k, v)| {
+            let mut all = vec![v.as_ref().to_string_lossy().into_owned()];
+            if k.as_ref() == crate::resolve::RESOLVED {
+                all.extend(crate::resolve::record_values(v.as_ref()));
+            }
+            all
+        })
         // A value pasted into a secret store often ends with a newline.
-        .map(|(_, v)| v.as_ref().to_string_lossy().trim().to_string())
+        .map(|v| v.trim().to_string())
         .filter(|v| v.chars().count() >= MIN_LEN)
         .collect();
     out.sort();

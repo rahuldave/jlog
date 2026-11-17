@@ -1,16 +1,24 @@
 #!/usr/bin/env bash
 # Measures the time that jlog adds to each line of a recipe. It runs one recipe
 # of N lines with `sh -cu`, then the same recipe with `jlog sh -cu`, in a
-# temporary repository, and prints the extra time for each line.
+# temporary repository, and prints the extra time for each line. With a
+# fourth argument, `scope`, the repository holds a `.jlog` scope with a bin
+# folder, two declared paths and two variables, so the time includes the
+# resolution of a real configuration.
 set -euo pipefail
 
 jlog="$(cd "$(dirname "$1")" && pwd)/$(basename "$1")"
 n="${2:-500}"
 rounds="${3:-10}"
+scope="${4:-}"
 dir="$(mktemp -d)"
 trap 'rm -rf -- "$dir"' EXIT
 mkdir -p "$dir/.agents"
 git -C "$dir" init -q
+if [ "$scope" = scope ]; then
+    mkdir -p "$dir/.jlog/bin" "$dir/a" "$dir/b"
+    printf '{"version": 1, "path": ["a", "b"], "env": {"X": "1", "Y": {"path": "y"}}}\n' > "$dir/.jlog/environment.json"
+fi
 
 body="$(for _ in $(seq "$n"); do printf '  true\n'; done)"
 printf 'set shell := ["sh", "-cu"]\na:\n%s\n' "$body" > "$dir/plain.just"
