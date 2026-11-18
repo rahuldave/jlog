@@ -52,11 +52,26 @@ diff-check:
 # The clone of nossaifd, whose check.py checks the prose. NOSSAIFD can name another folder.
 nossaifd := env_var_or_default("NOSSAIFD", home / "Projects/nossaifd")
 
-# Check the prose of the README with the nossaifd checker
+# Check the prose of the README and of the pages of the site with the nossaifd checker
 prose-check:
     {{ if env_var_or_default("NOSSAIFD", "") == "" { need_home } else { "true" } }}
     test -f "{{nossaifd}}/check.py" || { echo "prose-check needs nossaifd: git clone https://github.com/rahuldave/nossaifd {{nossaifd}}" >&2; exit 1; }
-    uv run --no-project --quiet python "{{nossaifd}}/check.py" README.md
+    for f in README.md docs/index.md docs/shell.md docs/environment.md docs/log.md docs/sessions.md docs/pass.md; do uv run --no-project --quiet python "{{nossaifd}}/check.py" "$f"; done
+
+# The site in docs/ is built with smalldocs. Keep the version the same as in .github/workflows/docs-site.yml.
+smalldocs := "uvx --quiet smalldocs@0.5.12"
+
+# Check the site: ignored keys, syntax that only Pandoc knows, and broken links
+docs-check:
+    {{smalldocs}} check docs
+
+# Build the site, and serve it on localhost with a reload on each change
+docs:
+    {{smalldocs}} preview docs
+
+# Build the site into docs/_site in strict mode, as the workflow does
+docs-build:
+    {{smalldocs}} render docs --strict
 
 # Measure the time that jlog adds to each line
 bench: build
@@ -66,7 +81,7 @@ bench: build
 # The plugins go before the tests, so their environments exist when the labs run them.
 
 # Everything that must pass before a commit
-check: fmt-check lint claude::check codex::check test diff-check prose-check
+check: fmt-check lint claude::check codex::check test diff-check prose-check docs-check
 
 # Install jlog with cargo, and copy the plugins to the plugins folder
 install: build install-plugins

@@ -1,0 +1,58 @@
+name: Documentation site
+
+# Builds the site in docs/ with smalldocs on each pull request. On a push to
+# main it also publishes the site to GitHub Pages at https://rahuldave.com/jlog/.
+# smalldocs runs with uvx, so the job needs no Python environment of its own.
+# Keep its version the same as `smalldocs` in the Justfile. Pages must use
+# "GitHub Actions" as its source in the settings of the repository.
+
+on:
+  pull_request: {}
+  push:
+    branches:
+      - main
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: documentation-site-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  build:
+    name: Build documentation site
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+      - name: Check the site
+        run: uvx --quiet smalldocs@0.5.12 check docs
+      - name: Render the site
+        run: uvx --quiet smalldocs@0.5.12 render docs --strict
+      - name: Upload site
+        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+        uses: actions/upload-pages-artifact@v5
+        with:
+          path: docs/_site
+
+  deploy:
+    name: Publish documentation
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy site
+        id: deployment
+        uses: actions/deploy-pages@v5

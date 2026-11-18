@@ -1,0 +1,53 @@
+# The site of jlog, built with smalldocs (https://pypi.org/project/smalldocs/).
+# Check:   just docs-check
+# Preview: just docs
+# The workflow .github/workflows/docs-site.yml builds it on each PR, and on a
+# push to main publishes it to GitHub Pages at https://rahuldave.com/jlog/.
+# The pages are only the files in project.render, so spec.md and kickoff.md
+# stay out of the site.
+project:
+  type: website
+  output-dir: _site
+  render:
+    - index.md
+    - shell.md
+    - environment.md
+    - log.md
+    - sessions.md
+    - pass.md
+
+website:
+  title: jlog
+  description: The shell of every just recipe, with a run log that the commit gates read
+  site-url: https://rahuldave.com/jlog/
+  repo-url: https://github.com/rahuldave/jlog
+  repo-subdir: docs
+  repo-actions: [source, issue]
+  page-navigation: true
+  navbar:
+    left:
+      - text: Home
+        href: index.md
+      - text: Shell
+        href: shell.md
+      - text: Environment
+        href: environment.md
+      - text: Run log
+        href: log.md
+      - text: Sessions
+        href: sessions.md
+      - text: Pass
+        href: pass.md
+    tools:
+      - icon: github
+        href: https://github.com/rahuldave/jlog
+  page-footer:
+    left: "Part of the commit gates of [jnterfaces](https://rahuldave.github.io/jnterfaces/)."
+    right: "Built with [smalldocs](https://docs.smallish.dev/)."
+
+# Atelier, from https://github.com/rahuldave/smalldocs-atelier, in _extensions/atelier.
+# Update it with: uvx smalldocs@0.5.12 add rahuldave/smalldocs-atelier --dir docs --force
+theme: atelier
+toc: true
+code-copy: true
+search: true
