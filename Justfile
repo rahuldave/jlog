@@ -100,6 +100,19 @@ release *args:
 release-check:
     {{release_tag}} --check
 
+# Build the release binary for TARGET, a Rust target triple, and pack it as dist/jlog-TARGET.tar.gz, with jlog and
+# the plugins at its top level, plus dist/jlog-TARGET.tar.gz.sha256. The job binaries of ci.yml runs it, and
+# scripts/install.sh installs the archive.
+dist target:
+    rustup target add {{target}}
+    cargo build --release --locked --target {{target}}
+    rm -rf "target/dist-stage/{{target}}"
+    mkdir -p "target/dist-stage/{{target}}" dist
+    cp "target/{{target}}/release/jlog" "target/dist-stage/{{target}}/jlog"
+    for d in plugins/*/; do n="$(basename "$d")"; mkdir -p "target/dist-stage/{{target}}/plugins/$n"; cp "$d/pyproject.toml" "$d/uv.lock" "$d/session.py" "target/dist-stage/{{target}}/plugins/$n/"; done
+    COPYFILE_DISABLE=1 tar -czf "dist/jlog-{{target}}.tar.gz" -C "target/dist-stage/{{target}}" jlog plugins
+    cd dist && shasum -a 256 "jlog-{{target}}.tar.gz" > "jlog-{{target}}.tar.gz.sha256"
+
 # Everything that must pass before a commit
 check: release-check fmt-check lint claude::check codex::check test diff-check prose-check docs-check
 

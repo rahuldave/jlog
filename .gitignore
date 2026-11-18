@@ -3,3 +3,5 @@
 __pycache__/
 # The site that just docs-build writes
 docs/_site/
+# The archives that just dist writes
+/dist/

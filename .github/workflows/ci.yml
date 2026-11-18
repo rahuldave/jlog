@@ -73,10 +73,10 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
+          - os: macos-15
             target: aarch64-apple-darwin
-          # GitHub retired macos-13, so the Intel build runs on macos-15-intel.
-          - os: macos-15-intel
+          # GitHub retired macos-13, and macos-14 no longer starts a job. So the Intel build is a cross build.
+          - os: macos-15
             target: x86_64-apple-darwin
           # musl gives a static binary that runs on any distribution.
           - os: ubuntu-24.04
@@ -96,38 +96,39 @@ jobs:
           tag="$(git tag --points-at HEAD 'v*' | sort -V | tail -n 1)"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
           if [ -z "$tag" ]; then echo "No tag v* on HEAD, so there is nothing to build."; fi
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: taiki-e/install-action@v2
         if: steps.tag.outputs.tag != ''
         with:
-          targets: ${{ matrix.target }}
+          tool: just
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.tag.outputs.tag != ''
       - name: Install musl
         if: steps.tag.outputs.tag != '' && runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
-      - name: Build
+      - name: Build and pack the archive
         if: steps.tag.outputs.tag != ''
-        run: cargo build --release --locked --target ${{ matrix.target }}
-      - name: Pack the archive and its hash
-        if: steps.tag.outputs.tag != ''
+        run: just dist ${{ matrix.target }}
+      # The binary must run here and print the version of the tag.
+      - name: Run the binary
+        if: steps.tag.outputs.tag != '' && matrix.target != 'x86_64-apple-darwin'
         env:
           TAG: ${{ steps.tag.outputs.tag }}
-          TARGET: ${{ matrix.target }}
         run: |
-          set -eu
-          stage="$RUNNER_TEMP/stage"
-          mkdir -p "$stage" dist
-          cp "target/$TARGET/release/jlog" "$stage/jlog"
-          for d in plugins/*/; do
-            n="$(basename "$d")"
-            mkdir -p "$stage/plugins/$n"
-            cp "$d/pyproject.toml" "$d/uv.lock" "$d/session.py" "$stage/plugins/$n/"
-          done
-          # The binary must run here and print the version of the tag.
-          got="$("$stage/jlog" --version)"
+          got="$(target/${{ matrix.target }}/release/jlog --version)"
           [ "$got" = "jlog ${TAG#v}" ] || { echo "jlog --version printed '$got', not 'jlog ${TAG#v}'" >&2; exit 1; }
-          asset="jlog-$TARGET.tar.gz"
-          tar -czf "dist/$asset" -C "$stage" jlog plugins
-          (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
-          cat "dist/$asset.sha256"
+      # The runner cannot run the Intel binary, so check its architecture.
+      - name: Check the Intel binary
+        if: steps.tag.outputs.tag != '' && matrix.target == 'x86_64-apple-darwin'
+        run: lipo -archs target/x86_64-apple-darwin/release/jlog | grep -qx x86_64
+      # file says "static-pie linked" for the x86_64 musl binary and "statically linked" for the arm64 one.
+      - name: Check that the Linux binary is static
+        if: steps.tag.outputs.tag != '' && runner.os == 'Linux'
+        run: |
+          file target/${{ matrix.target }}/release/jlog
+          file target/${{ matrix.target }}/release/jlog | grep -Eq 'statically linked|static-pie linked'
+      - name: Show the hash
+        if: steps.tag.outputs.tag != ''
+        run: cat dist/*.sha256
       - uses: actions/upload-artifact@v4
         if: steps.tag.outputs.tag != ''
         with:
