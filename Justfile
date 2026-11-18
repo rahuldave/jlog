@@ -19,6 +19,11 @@ mod claude 'plugins/claude'
 # The plugin for Codex
 mod codex 'plugins/codex'
 
+# rust::version prints the version of Cargo.toml, for the release tag. The rust profile of jnterfaces gives the same
+# recipe. If jlog installs that profile, take out this line and scripts/rust.just, because just stops on a module
+# defined twice.
+mod rust 'scripts/rust.just'
+
 [private]
 default:
     @just --list --unsorted
@@ -80,8 +85,23 @@ bench: build
 
 # The plugins go before the tests, so their environments exist when the labs run them.
 
+# The release tags. scripts/release_tag.py is a copy of .agents/skills/gpa/scripts/release_tag.py of
+# agent_gest_git_skills at the commit 799a44b, as in cx. The job release of ci.yml runs just release on each push to
+# main. The script runs just rust::version, because .agents/stack.json names the profile rust, so the tag is v plus
+# the version of Cargo.toml.
+release_tag := "uv run --no-project --quiet --no-python-downloads --python '>=3.9' python scripts/release_tag.py"
+
+# Tag HEAD with v plus the version of Cargo.toml, push the tag and check it. Takes --dry-run first
+[positional-arguments]
+release *args:
+    @{{release_tag}} "$@"
+
+# Fail when the version of Cargo.toml is below the last tag or the bump that the commits ask for. It needs no network
+release-check:
+    {{release_tag}} --check
+
 # Everything that must pass before a commit
-check: fmt-check lint claude::check codex::check test diff-check prose-check docs-check
+check: release-check fmt-check lint claude::check codex::check test diff-check prose-check docs-check
 
 # Install jlog with cargo, and copy the plugins to the plugins folder
 install: build install-plugins
