@@ -1,6 +1,6 @@
 # jlog
 
-`jlog` keeps a run log of the recipes of `just`. The commit gates of the stack read the run log, to see which steps ran on which tree. The design of the gates is in [docs/spec.md](docs/spec.md).
+`jlog` keeps a run log of the recipes of `just`. The commit gates of the stack read the run log, to see which steps ran on which tree. The design of the gates is in [docs/spec.md](docs/spec.md). The site of `jlog` is at <https://rahuldave.com/jlog/>.
 
 `just` has no log of its own. So a Justfile sets `jlog` as its shell, and `jlog` runs each line with the real shell. Then it adds one JSON line to the run log, `.agents/log/just.jsonl`.
 
@@ -46,7 +46,7 @@ test:
   cargo test
 ```
 
-`jlog` knows the line for `sh`, `bash`, `zsh`, `dash` and `python`. Before the line, it accepts only short flags that let the line run, such as `-eu` or `+x`, and the options `-o NAME`, `-O NAME` in bash, and `-W VALUE` or `-X VALUE` in python. Each NAME must be on a short list that lets the line run, for example `errexit`, `nounset`, `pipefail` or `extglob`, so `-o noexec` gives a null line. The option can also end a group of flags, as in `-euo pipefail`. The last group holds `c`, for example `-c`, `-cu` or `-euc`, and the line is the next argument. So these shells work, for example:
+`jlog` knows the line for `sh`, `bash`, `zsh`, `dash`, `python3` and `python3.N`. Before the line, it accepts only short flags that let the line run, such as `-eu` or `+x`, and the options `-o NAME`, `-O NAME` in bash, and `-W VALUE` or `-X VALUE` in python. Each NAME must be on a short list that lets the line run, for example `errexit`, `nounset`, `pipefail` or `extglob`, so `-o noexec` gives a null line. The option can also end a group of flags, as in `-euo pipefail`. The last group holds `c`, for example `-c`, `-cu` or `-euc`, and the line is the next argument. So these shells work, for example:
 
 ```just
 set shell := ["jlog", "sh", "-cu"]
@@ -381,13 +381,16 @@ Run each task with `just`:
 | `just build` | Builds the debug and the release binaries. |
 | `just test` | Runs the unit tests and the labs. A lab runs a real `just` in a temporary git repository. |
 | `just lint` | Runs clippy, with warnings as errors. |
-| `just check` | Runs `fmt-check`, `lint`, `test`, `diff-check`, `prose-check`, and the checks of both plugins. |
+| `just check` | Runs `fmt-check`, `lint`, `test`, `diff-check`, `prose-check`, `docs-check`, and the checks of both plugins. |
+| `just docs-check` | Checks the site in `docs/` with smalldocs, for broken links and keys that it ignores. |
+| `just docs` | Builds the site and serves it on localhost, with a reload on each change. |
+| `just docs-build` | Builds the site into `docs/_site` in strict mode, as the workflow does. |
 | `just claude::check`, `just codex::check` | Checks the lock file of a plugin, and runs its tests on fake transcripts. |
 | `just bench` | Measures the time that `jlog` adds to each line. |
 | `just install` | Installs `jlog`, and runs `install-plugins`. |
 | `just install-plugins` | Copies `pyproject.toml`, `uv.lock` and `session.py` of each plugin to `~/.local/share/jlog/plugins/`, and makes the environment of each plugin. |
 
-The labs need `just`, git, uv and `script(1)`, and the bench needs Perl. The tests remove the variables of each harness, so a test run inside Claude Code or Codex reads no real transcript. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR.
+The labs need `just`, git, uv and `script(1)`, and the bench needs Perl. The tests remove the variables of each harness, so a test run inside Claude Code or Codex reads no real transcript. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR. The workflow `.github/workflows/docs-site.yml` builds the site for each PR, and publishes it to GitHub Pages for each push to `main`.
 
 ## License
 
