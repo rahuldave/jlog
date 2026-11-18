@@ -409,6 +409,7 @@ Run each task with `just`:
 | `just bench` | Measures the time that `jlog` adds to each line. |
 | `just install` | Installs `jlog`, and runs `install-plugins`. |
 | `just release-check` | Fails when the version of `Cargo.toml` is below the last tag, or below the bump that the commit messages ask for. `just check` runs it. |
+| `just dist <target>` | Builds the release binary for one target, and packs `dist/jlog-<target>.tar.gz`, with `jlog` and the plugins, and its `.sha256`. CI runs it for the four targets. |
 | `just release` | Tags HEAD with `v` plus the version of `Cargo.toml`, and pushes the tag. CI runs it on each push to `main`. Take `--dry-run` first. |
 | `just install-plugins` | Copies `pyproject.toml`, `uv.lock` and `session.py` of each plugin to `~/.local/share/jlog/plugins/`, and makes the environment of each plugin. |
 
