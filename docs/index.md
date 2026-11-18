@@ -44,14 +44,25 @@ The gates stop the honest mistakes of agents. They do not stop an agent that che
 
 ## Install
 
-`jlog` needs Rust and `just`. The tests also need git.
+The installer downloads a release, so it needs no Rust:
 
-1. Clone the repository: `git clone https://github.com/rahuldave/jlog`.
-2. Run `just install` in the clone.
+```sh
+curl -fsSL https://raw.githubusercontent.com/rahuldave/jlog/main/scripts/install.sh | sh
+```
 
-The recipe builds `jlog` and installs it with `cargo install`, so the program goes to `~/.cargo/bin`. It also copies the plugins for Claude Code and Codex to `~/.local/share/jlog/plugins/`, and makes the environment of each one.
+To install one release, add its tag, as in `sh -s -- --tag v0.3.0`. The installer picks the build for your machine. There are builds for macOS and Linux, on arm64 and x86_64. It checks the SHA-256 hash of the download, and stops when the hash does not match. Then it puts:
 
-To install one release, check out its tag first, for example `git checkout v0.2.0`. Each release has a tag `vX.Y.Z` that matches the version in `Cargo.toml`.
+- **`jlog`** in `~/.local/bin`, or in the folder of `--dir DIR`;
+- **the plugins** for Claude Code and Codex in `~/.local/share/jlog/plugins/`, or in the folder in `JLOG_PLUGINS`, which must be an absolute path. When uv is in the PATH, it also makes the environment of each plugin.
+
+Each release has a tag `vX.Y.Z` that matches the version in `Cargo.toml`.
+
+### Build from source
+
+Each way needs Rust. The second also needs `just`.
+
+- **The program only.** Run `cargo install --git https://github.com/rahuldave/jlog --tag v0.3.0`. It installs no plugins.
+- **The program and the plugins.** Clone the repository, and run `just install` in the clone.
 
 `jlog` runs on macOS and Linux.
 

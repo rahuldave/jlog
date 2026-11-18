@@ -1,4 +1,7 @@
-# Runs `just check` on Linux and on macOS for each push to main and each PR.
+# Runs `just check` on Linux and on macOS for each push to main and each PR. On a push to main, after the checks
+# passed, the job release tags v plus the version of Cargo.toml, when that tag is new. Then the job binaries builds
+# jlog for four targets, and the job publish puts the archives on the GitHub release of the tag. A tag pushed with
+# GITHUB_TOKEN starts no other workflow, so the build runs here, in the workflow that makes the tag.
 name: CI
 
 on:
@@ -17,7 +20,10 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     runs-on: ${{ matrix.os }}
     steps:
+      # The whole history and the tags, for release-check.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - uses: taiki-e/install-action@v2
         with:
           tool: just
@@ -30,3 +36,153 @@ jobs:
         env:
           NOSSAIFD: ${{ runner.temp }}/nossaifd
         run: just check
+
+  # Tag the next release with just release. No agent runs here.
+  release:
+    needs: check
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    # One release at a time. A run on an older commit after a newer release prints no release.
+    concurrency:
+      group: release
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: astral-sh/setup-uv@v6
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: just
+      - name: Name the author of the tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+      - name: Tag the release
+        run: just release
+
+  # Build jlog-<target>.tar.gz and its .sha256 for the tag on HEAD. With no tag on HEAD, each step after the first is
+  # skipped and the job passes. The archive holds jlog and the plugins, which scripts/install.sh installs.
+  binaries:
+    needs: release
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-14
+            target: aarch64-apple-darwin
+          # GitHub retired macos-13, so the Intel build runs on macos-15-intel.
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          # musl gives a static binary that runs on any distribution.
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Find the tag on HEAD
+        id: tag
+        run: |
+          tag="$(git tag --points-at HEAD 'v*' | sort -V | tail -n 1)"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          if [ -z "$tag" ]; then echo "No tag v* on HEAD, so there is nothing to build."; fi
+      - uses: dtolnay/rust-toolchain@stable
+        if: steps.tag.outputs.tag != ''
+        with:
+          targets: ${{ matrix.target }}
+      - name: Install musl
+        if: steps.tag.outputs.tag != '' && runner.os == 'Linux'
+        run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
+      - name: Build
+        if: steps.tag.outputs.tag != ''
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Pack the archive and its hash
+        if: steps.tag.outputs.tag != ''
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+          TARGET: ${{ matrix.target }}
+        run: |
+          set -eu
+          stage="$RUNNER_TEMP/stage"
+          mkdir -p "$stage" dist
+          cp "target/$TARGET/release/jlog" "$stage/jlog"
+          for d in plugins/*/; do
+            n="$(basename "$d")"
+            mkdir -p "$stage/plugins/$n"
+            cp "$d/pyproject.toml" "$d/uv.lock" "$d/session.py" "$stage/plugins/$n/"
+          done
+          # The binary must run here and print the version of the tag.
+          got="$("$stage/jlog" --version)"
+          [ "$got" = "jlog ${TAG#v}" ] || { echo "jlog --version printed '$got', not 'jlog ${TAG#v}'" >&2; exit 1; }
+          asset="jlog-$TARGET.tar.gz"
+          tar -czf "dist/$asset" -C "$stage" jlog plugins
+          (cd dist && shasum -a 256 "$asset" > "$asset.sha256")
+          cat "dist/$asset.sha256"
+      - uses: actions/upload-artifact@v4
+        if: steps.tag.outputs.tag != ''
+        with:
+          name: binary-${{ matrix.target }}
+          path: dist/*
+          if-no-files-found: error
+
+  # Put the eight files on the release of the tag. Only this job and release may write. It has no concurrency group:
+  # a third run that queues in a group cancels the pending job, which would leave a tag with no release. Two runs
+  # publish two tags, so they do not conflict.
+  publish:
+    needs: binaries
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Find the tag on HEAD
+        id: tag
+        run: echo "tag=$(git tag --points-at HEAD 'v*' | sort -V | tail -n 1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@v4
+        if: steps.tag.outputs.tag != ''
+        with:
+          pattern: binary-*
+          path: dist
+          merge-multiple: true
+      - name: Publish the release
+        if: steps.tag.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -eu
+          ls -l dist
+          [ "$(ls dist | wc -l)" -eq 8 ] || { echo "expected 4 archives and 4 hashes in dist" >&2; exit 1; }
+          # Only the highest tag is the latest release, so a slow run of an older tag cannot take its place.
+          newest="$(git tag --list 'v*' | grep -E '^v[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -n 1)"
+          latest=false
+          [ "$TAG" != "$newest" ] || latest=true
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            # A re-run. When the release has all eight files, keep them: a new build differs byte for byte, and an
+            # upload one file at a time would serve a new archive with its old hash for a while.
+            have="$(gh release view "$TAG" --json assets --jq '[.assets[].name | select(test("^jlog-.*\\.tar\\.gz(\\.sha256)?$"))] | length')"
+            if [ "$have" -eq 8 ]; then
+              echo "The release $TAG has its eight files already."
+              exit 0
+            fi
+            # The archives first, then the hashes, so a hash never names an archive that is not there yet.
+            gh release upload "$TAG" dist/*.tar.gz --clobber
+            gh release upload "$TAG" dist/*.sha256 --clobber
+          else
+            gh release create "$TAG" --verify-tag --notes-from-tag --title "jlog ${TAG#v}" --latest="$latest" dist/*
+          fi

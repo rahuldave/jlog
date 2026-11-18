@@ -28,12 +28,32 @@ The shell form, the commands `run`, `path`, `session`, `env`, `tools`, `skip`, `
 
 ## Install
 
-`jlog` needs Rust and `just`. The tests also need git.
+The installer downloads a release, so it needs no Rust:
 
-1. Clone the repository.
-2. Run `just install` in the clone.
+```sh
+curl -fsSL https://raw.githubusercontent.com/rahuldave/jlog/main/scripts/install.sh | sh
+```
 
-The recipe `install` builds `jlog` and installs it with `cargo install`, so the program goes to `~/.cargo/bin`. When the repository has the folder `plugins/`, the recipe also copies it to `~/.local/share/jlog/plugins/`.
+To install one release, add its tag, as in `sh -s -- --tag v0.3.0`. The installer does these steps:
+
+1. It maps `uname -s` and `uname -m` to one of four targets. They are macOS on arm64 or x86_64, and Linux on arm64 or x86_64.
+2. It downloads `jlog-<target>.tar.gz` and its `.sha256` from the GitHub release, and checks the hash. A hash that does not match stops the install.
+3. It puts `jlog` in `~/.local/bin`, or in the folder of `--dir DIR`.
+4. It copies the plugins for Claude Code and Codex to `~/.local/share/jlog/plugins/`, or to the folder in `JLOG_PLUGINS`, which must be an absolute path. When uv is in the PATH, it also makes the environment of each plugin.
+5. It prints the version.
+
+The Linux builds are static, so they run on any distribution. The installer needs only curl, tar, and `sha256sum` or `shasum`.
+
+### Build from source
+
+Each way needs Rust. The second also needs `just`, and the tests need git.
+
+- **The program only.** Run `cargo install --git https://github.com/rahuldave/jlog --tag v0.3.0`. It installs no plugins.
+- **The program and the plugins.** Clone the repository, and run `just install` in the clone. The recipe installs `jlog` with `cargo install`, so the program goes to `~/.cargo/bin`. It also copies the plugins to `~/.local/share/jlog/plugins/`, and makes the environment of each one.
+
+When both `~/.local/bin` and `~/.cargo/bin` hold a `jlog`, the folder that comes first in the PATH wins.
+
+Each release has a tag `vX.Y.Z` that matches the version in `Cargo.toml`.
 
 ## Use
 
@@ -381,16 +401,18 @@ Run each task with `just`:
 | `just build` | Builds the debug and the release binaries. |
 | `just test` | Runs the unit tests and the labs. A lab runs a real `just` in a temporary git repository. |
 | `just lint` | Runs clippy, with warnings as errors. |
-| `just check` | Runs `fmt-check`, `lint`, `test`, `diff-check`, `prose-check`, `docs-check`, and the checks of both plugins. |
+| `just check` | Runs `release-check`, `fmt-check`, `lint`, `test`, `diff-check`, `prose-check`, `docs-check`, and the checks of both plugins. |
 | `just docs-check` | Checks the site in `docs/` with smalldocs, for broken links and keys that it ignores. |
 | `just docs` | Builds the site and serves it on localhost, with a reload on each change. |
 | `just docs-build` | Builds the site into `docs/_site` in strict mode, as the workflow does. |
 | `just claude::check`, `just codex::check` | Checks the lock file of a plugin, and runs its tests on fake transcripts. |
 | `just bench` | Measures the time that `jlog` adds to each line. |
 | `just install` | Installs `jlog`, and runs `install-plugins`. |
+| `just release-check` | Fails when the version of `Cargo.toml` is below the last tag, or below the bump that the commit messages ask for. `just check` runs it. |
+| `just release` | Tags HEAD with `v` plus the version of `Cargo.toml`, and pushes the tag. CI runs it on each push to `main`. Take `--dry-run` first. |
 | `just install-plugins` | Copies `pyproject.toml`, `uv.lock` and `session.py` of each plugin to `~/.local/share/jlog/plugins/`, and makes the environment of each plugin. |
 
-The labs need `just`, git, uv and `script(1)`, and the bench needs Perl. The tests remove the variables of each harness, so a test run inside Claude Code or Codex reads no real transcript. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR. The workflow `.github/workflows/docs-site.yml` builds the site for each PR, and publishes it to GitHub Pages for each push to `main`.
+The labs need `just`, git, uv and `script(1)`, and the bench needs Perl. The tests remove the variables of each harness, so a test run inside Claude Code or Codex reads no real transcript. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR. On a push to `main` that raises the version, CI also tags the release, builds `jlog` for the four targets, and puts the archives and their hashes on the GitHub release. The workflow `.github/workflows/docs-site.yml` builds the site for each PR, and publishes it to GitHub Pages for each push to `main`.
 
 ## License
 
