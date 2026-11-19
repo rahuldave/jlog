@@ -86,7 +86,7 @@ bench: build
 # The plugins go before the tests, so their environments exist when the labs run them.
 
 # The release tags. scripts/release_tag.py is a copy of .agents/skills/gpa/scripts/release_tag.py of
-# agent_gest_git_skills at the commit 799a44b, as in cx. The job release of ci.yml runs just release on each push to
+# agent_gest_git_skills at the commit fbf0837 (v0.3.3). The job release of ci.yml runs just release on each push to
 # main. The script runs just rust::version, because .agents/stack.json names the profile rust, so the tag is v plus
 # the version of Cargo.toml.
 release_tag := "uv run --no-project --quiet --no-python-downloads --python '>=3.9' python scripts/release_tag.py"
