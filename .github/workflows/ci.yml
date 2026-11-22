@@ -1,13 +1,27 @@
 # Runs `just check` on Linux and on macOS for each push to main and each PR. On a push to main, after the checks
-# passed, the job release tags v plus the version of Cargo.toml, when that tag is new. Then the job binaries builds
-# jlog for four targets, and the job publish puts the archives on the GitHub release of the tag. A tag pushed with
-# GITHUB_TOKEN starts no other workflow, so the build runs here, in the workflow that makes the tag.
+# passed, the job release runs just release. When the commits ask for a release, it writes the version into
+# Cargo.toml and Cargo.lock, commits it as chore(release): vX.Y.Z by github-actions[bot], tags that commit, and pushes
+# both. Then the job binaries builds jlog for four targets from the tag, and the job publish puts the archives on the
+# GitHub release of the tag. A push with GITHUB_TOKEN starts no other workflow, so the build runs here, in the
+# workflow that makes the tag, and the version commit gets no CI run of its own.
+#
+# When binaries or publish failed, use "Re-run failed jobs", which keeps the tag of the job release. "Re-run all jobs"
+# runs just release again on the pushed commit, which then finds the tag on the later version commit, prints "no
+# release" and skips the build. For that case, or when the job release failed after its push, run this workflow by
+# hand with the tag: gh workflow run CI --ref main -f tag=vX.Y.Z. The run then builds and publishes that tag, and makes
+# no new tag. A release that has its eight files already stays as it is.
 name: CI
 
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "The tag vX.Y.Z to build and publish. The run makes no new tag."
+        required: true
+        type: string
 
 permissions:
   contents: read
@@ -37,14 +51,18 @@ jobs:
           NOSSAIFD: ${{ runner.temp }}/nossaifd
         run: just check
 
-  # Tag the next release with just release. No agent runs here.
+  # Tag the next release with just release, or on a run by hand take the given tag. No agent runs here.
   release:
     needs: check
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: (github.event_name == 'push' && github.ref == 'refs/heads/main') || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
       contents: write
+    # The tag that the run made, or that was already on HEAD, else empty. The tag can be on the version commit, not on
+    # the pushed commit, so the later jobs check out this tag.
+    outputs:
+      tag: ${{ steps.release.outputs.tag || steps.given.outputs.tag }}
     # One release at a time. A run on an older commit after a newer release prints no release.
     concurrency:
       group: release
@@ -57,18 +75,32 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: just
-      - name: Name the author of the tag
+      - name: Name the author of the tag and of the version commit
+        if: github.event_name == 'push'
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-      - name: Tag the release
+      # just release writes tag=vX.Y.Z to GITHUB_OUTPUT.
+      - name: Release
+        if: github.event_name == 'push'
+        id: release
         run: just release
+      # A run by hand: the tag must be a release tag that exists.
+      - name: Take the given tag
+        if: github.event_name == 'workflow_dispatch'
+        id: given
+        env:
+          TAG: ${{ inputs.tag }}
+        run: |
+          printf '%s\n' "$TAG" | grep -Eqx 'v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)' || { echo "not a release tag vX.Y.Z: $TAG" >&2; exit 1; }
+          git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null || { echo "no tag $TAG" >&2; exit 1; }
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
 
-  # Build jlog-<target>.tar.gz and its .sha256 for the tag on HEAD. With no tag on HEAD, each step after the first is
-  # skipped and the job passes. The archive holds jlog and the plugins, which scripts/install.sh installs.
+  # Build jlog-<target>.tar.gz and its .sha256 for the tag of the job release. With no tag, the job is skipped. The
+  # archive holds jlog and the plugins, which scripts/install.sh installs.
   binaries:
     needs: release
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    if: needs.release.outputs.tag != ''
     strategy:
       fail-fast: false
       matrix:
@@ -88,49 +120,37 @@ jobs:
     steps:
       - uses: actions/checkout@v4
         with:
-          fetch-depth: 0
-          fetch-tags: true
-      - name: Find the tag on HEAD
-        id: tag
-        run: |
-          tag="$(git tag --points-at HEAD 'v*' | sort -V | tail -n 1)"
-          echo "tag=$tag" >> "$GITHUB_OUTPUT"
-          if [ -z "$tag" ]; then echo "No tag v* on HEAD, so there is nothing to build."; fi
+          ref: ${{ needs.release.outputs.tag }}
       - uses: taiki-e/install-action@v2
-        if: steps.tag.outputs.tag != ''
         with:
           tool: just
       - uses: dtolnay/rust-toolchain@stable
-        if: steps.tag.outputs.tag != ''
       - name: Install musl
-        if: steps.tag.outputs.tag != '' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: sudo apt-get update -q && sudo apt-get install -y -q musl-tools
       - name: Build and pack the archive
-        if: steps.tag.outputs.tag != ''
         run: just dist ${{ matrix.target }}
       # The binary must run here and print the version of the tag.
       - name: Run the binary
-        if: steps.tag.outputs.tag != '' && matrix.target != 'x86_64-apple-darwin'
+        if: matrix.target != 'x86_64-apple-darwin'
         env:
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.release.outputs.tag }}
         run: |
           got="$(target/${{ matrix.target }}/release/jlog --version)"
           [ "$got" = "jlog ${TAG#v}" ] || { echo "jlog --version printed '$got', not 'jlog ${TAG#v}'" >&2; exit 1; }
       # The runner cannot run the Intel binary, so check its architecture.
       - name: Check the Intel binary
-        if: steps.tag.outputs.tag != '' && matrix.target == 'x86_64-apple-darwin'
+        if: matrix.target == 'x86_64-apple-darwin'
         run: lipo -archs target/x86_64-apple-darwin/release/jlog | grep -qx x86_64
       # file says "static-pie linked" for the x86_64 musl binary and "statically linked" for the arm64 one.
       - name: Check that the Linux binary is static
-        if: steps.tag.outputs.tag != '' && runner.os == 'Linux'
+        if: runner.os == 'Linux'
         run: |
           file target/${{ matrix.target }}/release/jlog
           file target/${{ matrix.target }}/release/jlog | grep -Eq 'statically linked|static-pie linked'
       - name: Show the hash
-        if: steps.tag.outputs.tag != ''
         run: cat dist/*.sha256
       - uses: actions/upload-artifact@v4
-        if: steps.tag.outputs.tag != ''
         with:
           name: binary-${{ matrix.target }}
           path: dist/*
@@ -140,8 +160,8 @@ jobs:
   # a third run that queues in a group cancels the pending job, which would leave a tag with no release. Two runs
   # publish two tags, so they do not conflict.
   publish:
-    needs: binaries
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [release, binaries]
+    if: needs.release.outputs.tag != ''
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     permissions:
@@ -151,20 +171,15 @@ jobs:
         with:
           fetch-depth: 0
           fetch-tags: true
-      - name: Find the tag on HEAD
-        id: tag
-        run: echo "tag=$(git tag --points-at HEAD 'v*' | sort -V | tail -n 1)" >> "$GITHUB_OUTPUT"
       - uses: actions/download-artifact@v4
-        if: steps.tag.outputs.tag != ''
         with:
           pattern: binary-*
           path: dist
           merge-multiple: true
       - name: Publish the release
-        if: steps.tag.outputs.tag != ''
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.release.outputs.tag }}
         run: |
           set -eu
           ls -l dist
