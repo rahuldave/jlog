@@ -5,11 +5,11 @@
 # GitHub release of the tag. A push with GITHUB_TOKEN starts no other workflow, so the build runs here, in the
 # workflow that makes the tag, and the version commit gets no CI run of its own.
 #
-# When binaries or publish failed, use "Re-run failed jobs", which keeps the tag of the job release. "Re-run all jobs"
-# runs just release again on the pushed commit, which then finds the tag on the later version commit, prints "no
-# release" and skips the build. For that case, or when the job release failed after its push, run this workflow by
-# hand with the tag: gh workflow run CI --ref main -f tag=vX.Y.Z. The run then builds and publishes that tag, and makes
-# no new tag. A release that has its eight files already stays as it is.
+# When binaries or publish failed, re-run the jobs. "Re-run all jobs" runs just release again on the pushed commit,
+# which finds its version commit, prints "already released" and gives the same tag, so the build runs again. When the
+# job release failed after its push, or the tag needs a new build, run this workflow by hand with the tag:
+# gh workflow run CI --ref main -f tag=vX.Y.Z. The run then builds and publishes that tag, and makes no new tag. A
+# release that has its eight files already stays as it is.
 name: CI
 
 on:
