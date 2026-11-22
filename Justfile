@@ -86,17 +86,18 @@ bench: build
 # The plugins go before the tests, so their environments exist when the labs run them.
 
 # The release tags. scripts/release_tag.py is a copy of .agents/skills/gpa/scripts/release_tag.py of
-# agent_gest_git_skills at the commit 26ef730 (v0.4.1). The job release of ci.yml runs just release on each push to
-# main. The script runs just rust::version, because .agents/stack.json names the profile rust, so the tag is v plus
-# the version of Cargo.toml.
-release_tag := "uv run --no-project --quiet --no-python-downloads --python '>=3.9' python scripts/release_tag.py"
+# agent_gest_git_skills at the tag v0.6.0. The job release of ci.yml runs just release on each push to main. The
+# script runs just rust::version, because .agents/stack.json names the profile rust. A branch does not raise the
+# version. When the commits ask for a bump above the version of Cargo.toml, the release writes it into Cargo.toml
+# and Cargo.lock, commits it as chore(release): vX.Y.Z, and tags that commit. It reads TOML, so it needs Python 3.11.
+release_tag := "uv run --no-project --quiet --no-python-downloads --python '>=3.11' python scripts/release_tag.py"
 
-# Tag HEAD with v plus the version of Cargo.toml, push the tag and check it. Takes --dry-run first
+# Make the next tag, with the version commit when the commits ask for a bump, push it and check it. Takes --dry-run first
 [positional-arguments]
 release *args:
     @{{release_tag}} "$@"
 
-# Fail when the version of Cargo.toml is below the last tag or the bump that the commits ask for. It needs no network
+# Fail when the version of Cargo.toml is below the last tag, or cannot be written by the release. It needs no network
 release-check:
     {{release_tag}} --check
 

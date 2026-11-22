@@ -408,12 +408,12 @@ Run each task with `just`:
 | `just claude::check`, `just codex::check` | Checks the lock file of a plugin, and runs its tests on fake transcripts. |
 | `just bench` | Measures the time that `jlog` adds to each line. |
 | `just install` | Installs `jlog`, and runs `install-plugins`. |
-| `just release-check` | Fails when the version of `Cargo.toml` is below the last tag, or below the bump that the commit messages ask for. `just check` runs it. |
+| `just release-check` | Fails when the version of `Cargo.toml` is below the last tag, or when the release cannot write the next version. `just check` runs it. |
 | `just dist <target>` | Builds the release binary for one target, and packs `dist/jlog-<target>.tar.gz`, with `jlog` and the plugins, and its `.sha256`. CI runs it for the four targets. |
-| `just release` | Tags HEAD with `v` plus the version of `Cargo.toml`, and pushes the tag. CI runs it on each push to `main`. Take `--dry-run` first. |
+| `just release` | Makes the next tag from the commit messages. When they ask for a bump, it first writes the version into `Cargo.toml` and `Cargo.lock` and commits it. It pushes the commit and the tag. CI runs it on each push to `main`. Take `--dry-run` first. |
 | `just install-plugins` | Copies `pyproject.toml`, `uv.lock` and `session.py` of each plugin to `~/.local/share/jlog/plugins/`, and makes the environment of each plugin. |
 
-The labs need `just`, git, uv and `script(1)`, and the bench needs Perl. The tests remove the variables of each harness, so a test run inside Claude Code or Codex reads no real transcript. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR. On a push to `main` that raises the version, CI also tags the release, builds `jlog` for the four targets, and puts the archives and their hashes on the GitHub release. The workflow `.github/workflows/docs-site.yml` builds the site for each PR, and publishes it to GitHub Pages for each push to `main`.
+The labs need `just`, git, uv and `script(1)`, and the bench needs Perl. The tests remove the variables of each harness, so a test run inside Claude Code or Codex reads no real transcript. `jlog` runs on macOS and Linux. The CI workflow in `.github/workflows/ci.yml` runs `just check` on both, for each push to `main` and each PR. On a push to `main` whose commits ask for a release, CI also writes the version commit, tags it, builds `jlog` for the four targets, and puts the archives and their hashes on the GitHub release. The workflow `.github/workflows/docs-site.yml` builds the site for each PR, and publishes it to GitHub Pages for each push to `main`.
 
 ## License
 
