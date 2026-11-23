@@ -37,9 +37,13 @@ fn logs_one_line_with_the_fields() {
     assert_eq!(
         keys,
         [
-            "argv", "child", "end", "exit", "harness", "kind", "line", "run", "session", "start"
+            "argv", "at", "child", "end", "exit", "harness", "kind", "line", "run", "seconds",
+            "session", "start"
         ]
     );
+    let (seconds, at) = (e["seconds"].as_f64().unwrap(), e["at"].as_f64().unwrap());
+    assert!((0.0..5.0).contains(&seconds), "{e}");
+    assert!(at > 1.7e9 && (at * 1000.0).fract().abs() < 1e-3, "{e}");
     assert_eq!(e["harness"], "terminal");
     assert_eq!(e["child"], false);
     assert_eq!(e["line"], "true");

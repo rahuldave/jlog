@@ -586,3 +586,175 @@ fn a_relative_index_from_a_hook_is_found_from_a_subfolder() {
     let trees = records(&sub, "tree");
     assert_eq!(trees[0]["tree"], git(top, &["write-tree"]));
 }
+
+fn jlog_times(dir: &Path, args: &[&str]) -> Output {
+    let mut c = common::cmd(JLOG);
+    c.arg("times")
+        .args(args)
+        .current_dir(dir)
+        .env_remove("JLOG_RUN");
+    c.output().unwrap()
+}
+
+#[test]
+fn each_step_skip_and_pass_logs_its_time() {
+    let steps = "lint:\n  sleep 0.3\n  JLOG step lint\n\
+                 typecheck:\n  JLOG skip typecheck \"no type checker\"\n";
+    let r = repo(steps, &["lint"]);
+    let out = just(r.path(), &["check"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let tree = &records(r.path(), "tree")[0];
+    let step = &records(r.path(), "step")[0];
+    let skip = &records(r.path(), "skip")[0];
+    let pass = &passes(r.path())[0];
+    let lint = step["seconds"].as_f64().unwrap();
+    assert!((0.3..10.0).contains(&lint), "{step}");
+    // The step starts at the tree, and the skip at the step.
+    assert_eq!(step["start"], tree["time"]);
+    assert_eq!(skip["start"], step["time"]);
+    let gap = skip["at"].as_f64().unwrap() - step["at"].as_f64().unwrap();
+    assert!(
+        (skip["seconds"].as_f64().unwrap() - gap).abs() < 0.002,
+        "{skip}"
+    );
+    let total = pass["seconds"].as_f64().unwrap();
+    assert!(total >= lint, "{pass}");
+    assert_eq!(pass["times"][0]["step"], "lint");
+    assert_eq!(pass["times"][0]["kind"], "step");
+    assert_eq!(pass["times"][0]["seconds"], step["seconds"]);
+    assert_eq!(pass["times"][1]["kind"], "skip");
+    let line = run_log(r.path())
+        .into_iter()
+        .find(|l| l["line"] == "sleep 0.3")
+        .unwrap();
+    assert!(line["seconds"].as_f64().unwrap() >= 0.3, "{line}");
+
+    let out = jlog_times(r.path(), &[]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    let run = pass["run"].as_str().unwrap();
+    assert!(
+        text.starts_with(&format!("run {run} (just check): passed\n")),
+        "{text}"
+    );
+    assert!(
+        text.contains("  lint ") && text.contains("  skip\n") && text.contains("  total "),
+        "{text}"
+    );
+    // A run given by its ID prints the same table.
+    assert_eq!(jlog_times(r.path(), &[run]).stdout, out.stdout);
+}
+
+#[test]
+fn jlog_times_names_the_step_that_failed_and_its_time() {
+    // `check` runs the step `typecheck` as an inner `just` call, as in
+    // Gossil, so the failed line names it.
+    let steps = "lint:\n  true\n  JLOG step lint\n\
+                 typecheck:\n  sleep 0.2\n  false\n  JLOG step typecheck\n";
+    let r = repo(steps, &["lint"]);
+    let text = fs::read_to_string(r.path().join("Justfile")).unwrap();
+    let inner = format!("check: lint\n  just typecheck\n  {JLOG} pass\n");
+    let jf = text.replace(&format!("check: lint typecheck\n  {JLOG} pass\n"), &inner);
+    assert_ne!(jf, text);
+    fs::write(r.path().join("Justfile"), jf).unwrap();
+    commit(r.path());
+    let out = just(r.path(), &["check"], &[]);
+    assert!(!out.status.success());
+    assert!(passes(r.path()).is_empty());
+    let out = jlog_times(r.path(), &[]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(text.lines().next().unwrap().ends_with(": failed"), "{text}");
+    let failed = text.lines().find(|l| l.ends_with("  failed")).unwrap();
+    assert!(failed.trim_start().starts_with("typecheck "), "{text}");
+    let secs: f64 = failed.split_whitespace().nth(1).unwrap().parse().unwrap();
+    assert!(secs >= 0.2, "{text}");
+    assert!(text.ends_with("the line that failed: false\n"), "{text}");
+}
+
+#[test]
+fn a_failure_outside_a_step_names_no_step() {
+    // `setup` is not a step. Its failure must not name `lint`, which never ran.
+    let steps = "setup:\n  false\nlint:\n  true\n  JLOG step lint\n\
+                 typecheck:\n  JLOG skip typecheck \"none\"\n";
+    let r = repo(steps, &["lint"]);
+    let text = fs::read_to_string(r.path().join("Justfile")).unwrap();
+    fs::write(
+        r.path().join("Justfile"),
+        text.replace("check: lint", "check: setup lint"),
+    )
+    .unwrap();
+    commit(r.path());
+    just(r.path(), &["check"], &[]);
+    let text = String::from_utf8_lossy(&jlog_times(r.path(), &[]).stdout).to_string();
+    assert!(text.contains("(just check): failed"), "{text}");
+    assert!(
+        text.contains("  (failed) ") && !text.contains("  lint "),
+        "{text}"
+    );
+}
+
+#[test]
+fn jlog_times_from_a_recipe_shows_the_last_check() {
+    // `just times` and `just build` after `just check` make runs of their own,
+    // which are not checks.
+    let steps = format!("{STEPS}times:\n  JLOG times\nbuild:\n  true\nbad:\n  false\n");
+    let r = repo(&steps, &["lint"]);
+    assert!(just(r.path(), &["check"], &[]).status.success());
+    let run = passes(r.path())[0]["run"].as_str().unwrap().to_string();
+    just(r.path(), &["build"], &[]);
+    // A failed command after the check does not hide it either.
+    assert!(!just(r.path(), &["bad"], &[]).status.success());
+    assert!(!just(r.path(), &["times", "nosuch"], &[]).status.success());
+    let out = just(r.path(), &["times"], &[]);
+    assert!(out.status.success(), "{out:?}");
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.starts_with(&format!("run {run} (just check): passed\n")),
+        "{text}"
+    );
+}
+
+#[test]
+fn a_tolerated_failure_names_no_step_of_the_list() {
+    // A `-` line fails without ending the recipe. jlog cannot tell, so the
+    // run shows as failed, but it names no step that did not run.
+    let steps = format!("{STEPS}tol:\n  JLOG step lint\n  -false\n");
+    let r = repo(&steps, &["lint"]);
+    assert!(just(r.path(), &["tol"], &[]).status.success());
+    let text = String::from_utf8_lossy(&jlog_times(r.path(), &[]).stdout).to_string();
+    assert!(text.contains("(just tol): failed"), "{text}");
+    assert!(
+        text.contains("  (failed after lint) ") && !text.contains("typecheck"),
+        "{text}"
+    );
+}
+
+#[test]
+fn jlog_times_needs_a_run_of_the_log() {
+    let r = repo(STEPS, &["lint"]);
+    let out = jlog_times(r.path(), &[]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    just(r.path(), &["check"], &[]);
+    let out = jlog_times(r.path(), &["no-such-run"]);
+    assert_eq!(out.status.code(), Some(1), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stderr).contains("no record of the run no-such-run"));
+    assert_eq!(jlog_times(r.path(), &["a", "b"]).status.code(), Some(2));
+    // jlog times logs nothing.
+    let before = run_log(r.path()).len();
+    jlog_times(r.path(), &[]);
+    assert_eq!(run_log(r.path()).len(), before);
+}
+
+#[test]
+fn a_cut_off_write_does_not_stop_jlog_times() {
+    let r = repo(STEPS, &["lint"]);
+    assert!(just(r.path(), &["check"], &[]).status.success());
+    let log = r.path().join(".agents/log/just.jsonl");
+    let mut bytes = fs::read(&log).unwrap();
+    bytes.extend_from_slice(b"{\"kind\":\"line\",\"line\":\"\xc3");
+    fs::write(&log, bytes).unwrap();
+    let out = jlog_times(r.path(), &[]);
+    assert!(out.status.success(), "{out:?}");
+    assert!(String::from_utf8_lossy(&out.stdout).contains("(just check): passed"));
+}
