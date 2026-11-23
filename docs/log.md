@@ -5,7 +5,7 @@ title: The run log
 Each line of a recipe adds one JSON line to the run log, `.agents/log/just.jsonl`:
 
 ```json
-{"run":"48213-1794498589","argv":["just","test"],"line":"cargo test","exit":0,"start":"2026-11-12T10:00:00Z","end":"2026-11-12T10:00:04Z","kind":"line","harness":"terminal","session":"301-1794490000","child":false}
+{"run":"48213-1794498589","argv":["just","test"],"line":"cargo test","exit":0,"start":"2026-11-12T10:00:00Z","end":"2026-11-12T10:00:04Z","seconds":4.212,"at":1794477604.212,"kind":"line","harness":"terminal","session":"301-1794490000","child":false}
 ```
 
 | Field | Meaning |
@@ -15,6 +15,8 @@ Each line of a recipe adds one JSON line to the run log, `.agents/log/just.jsonl
 | `line` | The line of the recipe, before the shell expands it. It is null when `jlog` cannot tell which argument is the line. |
 | `exit` | The exit code of the shell. A shell that a signal stopped gets 128 plus the number of the signal. |
 | `start`, `end` | The times in UTC, to the second. |
+| `seconds` | The time that the line took, to the millisecond. |
+| `at` | The end, in seconds since 1970, to the millisecond. Each record of the log has this field. |
 | `kind` | `line` for a line of a recipe, and `backtick` for a backtick. The gates ignore backticks. |
 | `harness` | `codex`, `claude` or `terminal`. |
 | `session` | The ID of the session. The page [Sessions](sessions.md) says where it comes from. |

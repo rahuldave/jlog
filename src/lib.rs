@@ -15,6 +15,7 @@ pub mod resolve;
 pub mod session;
 pub mod shell;
 pub mod time;
+pub mod times;
 pub mod tree;
 
 pub const USAGE: &str = "\
@@ -25,6 +26,7 @@ usage: jlog <shell> <flags> <line> [args...]
        jlog skip <step> <reason>
        jlog step <step>
        jlog pass
+       jlog times [RUN]
 
 Runs <line> with <shell> and adds one JSON line to .agents/log/just.jsonl.
 A Justfile sets it as its shell:
@@ -33,7 +35,8 @@ A Justfile sets it as its shell:
 
 The commands log the session, the environment, the versions of the tools,
 a step that has nothing to do, the end of a step that passed, or the pass
-of `just check`, and print what they log.
+of `just check`, and print what they log. `jlog times` prints the time of
+each step of a run, by default the last one, and logs nothing.
 
 Before each of these, jlog resolves the PATH and the environment from the
 `.jlog` folders above the current folder and the user defaults.

@@ -24,7 +24,8 @@ pub const PLUGIN_LIMIT: Duration = Duration::from_secs(5);
 const MAX_TEXT: usize = 4096;
 
 /// One record of the run log, other than a line: the kind, the run, the
-/// session and the time, then the fields of the kind.
+/// session, the time to the second and as Unix seconds, then the fields of
+/// the kind.
 #[derive(Serialize)]
 struct Record<'a, T: Serialize> {
     kind: &'static str,
@@ -32,8 +33,28 @@ struct Record<'a, T: Serialize> {
     #[serde(flatten)]
     session: &'a Session,
     time: String,
+    at: f64,
     #[serde(flatten)]
     body: T,
+}
+
+impl<'a, T: Serialize> Record<'a, T> {
+    fn new(
+        kind: &'static str,
+        run: Option<&'a str>,
+        session: &'a Session,
+        now: SystemTime,
+        body: T,
+    ) -> Self {
+        Record {
+            kind,
+            run,
+            session,
+            time: time::utc(now),
+            at: time::unix(now),
+            body,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, PartialEq, Eq)]
@@ -64,6 +85,41 @@ struct Skip {
     argv: Vec<String>,
     step: String,
     reason: String,
+    #[serde(flatten)]
+    took: Took,
+}
+
+/// The time of a step or a skip: from the record before it in the run, the
+/// tree or the step or skip before it, to the record itself. None for both
+/// when the run has no such record with a field `at`.
+#[derive(Serialize)]
+struct Took {
+    start: Option<String>,
+    seconds: Option<f64>,
+}
+
+/// The time since the last tree, step or skip of the run, up to `now`.
+fn took(run: Option<&str>, now: SystemTime) -> Took {
+    let last = run.zip(log_root()).and_then(|(run, root)| {
+        crate::times::last_mark_in_file(&root.join(logdir::LOG).join(logdir::RUN_LOG), run)
+    });
+    match last {
+        Some(at) => Took {
+            start: time::from_unix(at).map(time::utc),
+            seconds: Some(time::between(at, time::unix(now))),
+        },
+        None => Took {
+            start: None,
+            seconds: None,
+        },
+    }
+}
+
+/// The folder that holds `.agents/` above the current folder.
+fn log_root() -> Option<PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    logdir::find_root(&cwd, home.as_deref())
 }
 
 /// Runs a command, and gives the exit code. None when `args` is not a command.
@@ -95,6 +151,7 @@ pub fn run(args: &[OsString]) -> Option<i32> {
         "step" => step(rest),
         "pass" if !rest.is_empty() => usage("jlog pass takes no argument"),
         "pass" => pass(),
+        "times" => times(rest),
         _ => return None,
     };
     Some(code)
@@ -133,13 +190,8 @@ fn command(body: impl FnOnce(&Session) -> (&'static str, serde_json::Result<Valu
     let session = Session::detect();
     let (run, _) = run_here();
     let (kind, body) = body(&session);
-    let record = Record {
-        kind,
-        run: run.as_deref(),
-        session: &session,
-        time: time::utc(SystemTime::now()),
-        body: body.expect("a record always serializes"),
-    };
+    let body = body.expect("a record always serializes");
+    let record = Record::new(kind, run.as_deref(), &session, SystemTime::now(), body);
     write(&record)
 }
 
@@ -253,24 +305,22 @@ fn skip(rest: &[OsString]) -> i32 {
         .iter()
         .map(|a| redact::redact(a, &secrets))
         .collect();
-    let record = Record {
-        kind: "skip",
-        run: run.as_deref(),
-        session: &session,
-        time: time::utc(SystemTime::now()),
-        body: Skip {
-            argv,
-            step: redact::redact(step, &secrets),
-            reason: redact::redact(&reason, &secrets),
-        },
+    let now = SystemTime::now();
+    let body = Skip {
+        argv,
+        step: redact::redact(step, &secrets),
+        reason: redact::redact(&reason, &secrets),
+        took: took(run.as_deref(), now),
     };
-    write(&record)
+    write(&Record::new("skip", run.as_deref(), &session, now, body))
 }
 
 #[derive(Serialize)]
 struct Step {
     argv: Vec<String>,
     step: String,
+    #[serde(flatten)]
+    took: Took,
 }
 
 /// `jlog step <step>`: the last line of a step recipe. just stops a recipe at
@@ -294,28 +344,28 @@ fn step(rest: &[OsString]) -> i32 {
         .iter()
         .map(|a| redact::redact(a, &secrets))
         .collect();
-    let record = Record {
-        kind: "step",
-        run: run.as_deref(),
-        session: &session,
-        time: time::utc(SystemTime::now()),
-        body: Step {
-            argv,
-            step: redact::redact(step, &secrets),
-        },
+    let now = SystemTime::now();
+    let body = Step {
+        argv,
+        step: redact::redact(step, &secrets),
+        took: took(run.as_deref(), now),
     };
-    write(&record)
+    write(&Record::new("step", run.as_deref(), &session, now, body))
 }
 
 #[derive(Serialize)]
 struct PassBody {
     tree: String,
     steps: Vec<String>,
+    #[serde(flatten)]
+    summary: crate::times::Summary,
 }
 
 #[derive(Serialize)]
 struct NoPass {
     reasons: Vec<String>,
+    #[serde(flatten)]
+    summary: crate::times::Summary,
 }
 
 /// `jlog pass`: writes a pass for the worktree tree when each rule holds.
@@ -389,31 +439,78 @@ fn pass() -> i32 {
         Ok(_) => {}
         Err(e) => reasons.push(e),
     }
-    let now_text = time::utc(SystemTime::now());
+    let now = SystemTime::now();
+    let summary = crate::times::summary(&records, time::unix(now));
     if reasons.is_empty() {
         let tree = tree.expect("a tree when there is no reason");
         let steps = read_stack(&root).map(|s| s.steps).unwrap_or_default();
-        let record = Record {
-            kind: "pass",
-            run: run.as_deref(),
-            session: &session,
-            time: now_text,
-            body: PassBody { tree, steps },
+        let body = PassBody {
+            tree,
+            steps,
+            summary,
         };
-        return write(&record);
+        return write(&Record::new("pass", run.as_deref(), &session, now, body));
     }
     for r in &reasons {
         warn(format_args!("no pass: {r}"));
     }
-    let record = Record {
-        kind: "no-pass",
-        run: run.as_deref(),
-        session: &session,
-        time: now_text,
-        body: NoPass { reasons },
-    };
-    let _ = write(&record);
+    let body = NoPass { reasons, summary };
+    let _ = write(&Record::new("no-pass", run.as_deref(), &session, now, body));
     1
+}
+
+/// `jlog times [RUN]`: prints the time of each step of a run, by default the
+/// last run of a check. It logs nothing.
+fn times(rest: &[OsString]) -> i32 {
+    let run = match rest {
+        [] => None,
+        [run] => match run.to_str() {
+            Some(r) => Some(r.to_string()),
+            None => return usage("a run ID is text"),
+        },
+        _ => return usage("usage: jlog times [RUN]"),
+    };
+    let Some(root) = log_root() else {
+        warn(format_args!("no log folder above this folder"));
+        return 1;
+    };
+    let path = root.join(logdir::LOG).join(logdir::RUN_LOG);
+    // A write that was cut off can leave bytes that are not UTF-8. Such a
+    // line is not JSON, so it is skipped, and the rest of the log counts.
+    let text = match std::fs::read(&path) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
+        Err(e) => {
+            warn(format_args!("could not read {}: {e}", path.display()));
+            return 1;
+        }
+    };
+    let all = || {
+        text.lines()
+            .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+            .collect::<Vec<_>>()
+    };
+    let Some(run) = run.or_else(|| crate::times::last_run(&all())) else {
+        warn(format_args!("the run log has no run of a check"));
+        return 1;
+    };
+    // A quick test on the text first, with the run as JSON writes it.
+    let quoted = serde_json::to_string(&run).expect("a string serializes");
+    let records: Vec<Value> = text
+        .lines()
+        .filter(|l| l.contains(quoted.as_str()))
+        .filter_map(|l| serde_json::from_str::<Value>(l).ok())
+        .filter(|r| r["run"] == run.as_str())
+        .collect();
+    if records.is_empty() {
+        warn(format_args!("the run log has no record of the run {run}"));
+        return 1;
+    }
+    let steps = crate::pass::read_stack(&root)
+        .map(|s| s.steps)
+        .unwrap_or_default();
+    let table = crate::times::table(&records, &steps);
+    let _ = std::io::stdout().write_all(crate::times::render(&run, &table).as_bytes());
+    0
 }
 
 /// The records of the run log with the run `run`.
@@ -577,14 +674,8 @@ pub fn first_of_session(dir: &LogDir, run: &str, session: &Session) -> std::io::
     let snap = env::snapshot_here(Some(dir));
     let plugin = plugin.join().unwrap_or_default();
     let tools = tools_handle.join().unwrap_or_default();
-    let now = time::utc(SystemTime::now());
-    let rec = |kind, body: Value| Record {
-        kind,
-        run: Some(run),
-        session,
-        time: now.clone(),
-        body,
-    };
+    let now = SystemTime::now();
+    let rec = |kind, body: Value| Record::new(kind, Some(run), session, now, body);
     for r in [
         rec("session", serde_json::to_value(plugin).expect("serializes")),
         rec("env", serde_json::to_value(snap).expect("serializes")),

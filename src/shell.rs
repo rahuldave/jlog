@@ -25,6 +25,10 @@ pub struct Line {
     pub exit: i32,
     pub start: String,
     pub end: String,
+    /// The time of the line, to the millisecond.
+    pub seconds: f64,
+    /// The end as Unix seconds, to the millisecond.
+    pub at: f64,
     /// `line` for a line of a recipe, `backtick` for a backtick.
     pub kind: &'static str,
     #[serde(flatten)]
@@ -39,6 +43,7 @@ struct TreeRecord<'a> {
     run: &'a str,
     tree: Option<String>,
     time: String,
+    at: f64,
     #[serde(flatten)]
     session: crate::session::Session,
 }
@@ -457,11 +462,14 @@ impl Before {
                 // later line of the run starts before it. The lock goes
                 // before the line runs, because the line can be an inner
                 // `just` call, whose lines are later lines of this run.
+                let tree = crate::tree::worktree_tree(&root).ok();
+                let now = SystemTime::now();
                 let record = TreeRecord {
                     kind: "tree",
                     run: &run,
-                    tree: crate::tree::worktree_tree(&root).ok(),
-                    time: time::utc(SystemTime::now()),
+                    tree,
+                    time: time::utc(now),
+                    at: time::unix(now),
                     session: crate::session::Session::detect(),
                 };
                 let json = serde_json::to_string(&record).expect("a record always serializes");
@@ -512,6 +520,8 @@ fn log(
         exit,
         start: time::utc(start),
         end: time::utc(end),
+        seconds: time::seconds(end.duration_since(start).unwrap_or_default()),
+        at: time::unix(end),
         kind,
         session: crate::session::Session::detect(),
     };

@@ -390,6 +390,7 @@ one JSON line to the run log:
 | `jlog tools` | The version of each program in the tools table. |
 | `jlog skip <step> <reason>` | A no-op step. |
 | `jlog pass` | The pass of `just check`. |
+| `jlog times [RUN]` | Nothing. It prints the time of each step of a run. |
 
 - **Once for each session.** The first line in a new session also runs
   `session`, `env` and `tools`. `jlog` marks a session as seen with a file
@@ -533,6 +534,15 @@ check: fmt-check lint typecheck test integration docs-check prose-check diff-che
 - The worktree tree at the end equals the worktree tree at the start.
 - The worktree has no unstaged change and no untracked file that git does not
   ignore.
+
+Each record has `at`, its time in seconds since 1970, to the millisecond. A line
+also has `seconds`, its time. A step or a skip has `start` and `seconds`: the
+time from the record before it in the run, the tree or the step or skip before
+it. The pass and the no-pass have `seconds`, the time of the whole run, and
+`times`, the seconds of each step. `jlog times` prints them, and for a failed
+run, the time up to the failed line and the line itself. Gossil asked for this on 2026-11-22: a
+`just check` of 911 s had an integration step of 495 s, which only timing by
+hand found.
 
 ### Gates
 

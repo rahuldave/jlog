@@ -96,7 +96,7 @@ A repository that already sets a shell keeps it, wrapped in `jlog`. For example,
 Each line of a recipe then adds a line like this one to the run log:
 
 ```json
-{"run":"48213-1794498589","argv":["just","test"],"line":"cargo test","exit":0,"start":"2026-11-12T10:00:00Z","end":"2026-11-12T10:00:04Z","kind":"line","harness":"terminal","session":"301-1794490000","child":false}
+{"run":"48213-1794498589","argv":["just","test"],"line":"cargo test","exit":0,"start":"2026-11-12T10:00:00Z","end":"2026-11-12T10:00:04Z","seconds":4.212,"at":1794477604.212,"kind":"line","harness":"terminal","session":"301-1794490000","child":false}
 ```
 
 | Field | Meaning |
@@ -106,6 +106,8 @@ Each line of a recipe then adds a line like this one to the run log:
 | `line` | The line of the recipe, before the shell expands it. It is null when `jlog` cannot tell which argument is the line. |
 | `exit` | The exit code of the shell. A shell that a signal stopped gets 128 plus the number of the signal. |
 | `start`, `end` | The times in UTC, to the second. |
+| `seconds` | The time that the line took, to the millisecond. |
+| `at` | The end, in seconds since 1970, to the millisecond. Each record of the log has this field. |
 | `kind` | `line` for a line of a recipe, and `backtick` for a backtick. The gates ignore backticks. |
 | `harness` | `codex`, `claude` or `terminal`. |
 | `session` | The ID of the session. The section "Sessions" says where it comes from. |
@@ -274,8 +276,9 @@ A command takes the run from `JLOG_RUN`, or else from the nearest `just` above i
 | `jlog skip <step> <reason>` | A step with nothing to do, and the reason. A step is a name of letters, digits, `-` and `_`. |
 | `jlog step <step>` | The end of a step that passed. It is the last line of the recipe of each step. |
 | `jlog pass` | A pass for the worktree tree, when each rule of the section "The pass" holds. It is the last line of `check`. |
+| `jlog times [RUN]` | Nothing. It prints the time of each step of the last run, or of the run `RUN`. The section "The time of each step" says more. |
 
-With no argument, `session`, `env` and `tools` are commands. With arguments, they are the shell form, so `jlog env sh -c LINE` still runs a shell. The names `skip`, `step` and `pass` are always commands. So a typo such as `jlog tools x` runs a program named `tools`, and the run log shows a failed line with exit 127.
+With no argument, `session`, `env` and `tools` are commands. With arguments, they are the shell form, so `jlog env sh -c LINE` still runs a shell. The names `skip`, `step`, `pass` and `times` are always commands. So a typo such as `jlog tools x` runs a program named `tools`, and the run log shows a failed line with exit 127.
 
 **`jlog env`** also tells, for each variable, whether its value changed since the last snapshot. It shows `changed` as true or false, and as null when it has nothing to compare with. The list `gone` names the variables that the last snapshot had and this one has not.
 
@@ -310,6 +313,36 @@ check: lint typecheck
 - **A step after another command,** such as `false || jlog step lint`.
 
 The line must start with the bare word `jlog`, or with a path to `jlog` that has no space. So `exec jlog step lint` and `VAR=1 jlog step lint` fail too.
+
+### The time of each step
+
+A record `step` or `skip` also logs how long the step took:
+
+- **`start`.** The time of the record before it in the run. That record is the tree of the run, or the step or skip before it.
+- **`seconds`.** The time from that record to this one, to the millisecond.
+
+`just` runs the dependencies of `check` one at a time, so that is the time of the step. A recipe that is not a step adds its time to the next step. Two cases give wrong times:
+
+- **Steps that run at the same time,** as with `[parallel]`. Each step gets the time since the record before it, so a step that ends second gets only the gap after the first one.
+- **A `JLOG_RUN` set by hand to an old run.** The first step then gets the time since the last record of that old run.
+
+The records `pass` and `no-pass` also log `seconds`, the time from the tree of the run to the record. They also log `times`, a list with the step, the kind and the seconds of each step and skip.
+
+`jlog times` prints this list for the last run of a check, and logs nothing. The last run of a check is the last run with a step, a skip, a pass or a no-pass, or with a failed line and a line of `just check`. So a `just build` or a `just times` after `just check` does not hide the check, even when it fails. `jlog times RUN` prints the list for the run `RUN`:
+
+```text
+run 3f2c9a7e-1b9d-4c56-a0f1-2d8e5b7c9a10 (just check): failed
+  lint                      4.1 s
+  typecheck                 0.0 s  skip
+  test                    191.3 s
+  (failed after test)     495.0 s  failed
+  total                   690.4 s
+the line that failed: cargo test --test integration
+```
+
+The first line gives the `just` command of the run and its outcome, which is `passed`, `no pass`, `failed` or `not finished`. A run is failed when a line failed after the last step. The time from the last step to the failed line is then the failed part. It is named for the step when the failed line ran in an inner call such as `just integration`. Otherwise, as when `check` lists the steps as its dependencies, it is named `(failed after lint)`, after the step before it, or `(failed)` when there is none. The line that failed shows which step it was.
+
+A line with `-` in front of it can fail without ending the recipe. `jlog` cannot tell, so such a run also shows as failed. A run that an older `jlog` logged has no times, so `jlog times` prints `-`.
 
 A failed command in a pipe does not fail the line in `sh`, so `cargo test | tee log` passes when the tests fail. Use a shell with `pipefail` for such lines, for example `["jlog", "bash", "-eu", "-o", "pipefail", "-c"]`. `jlog pass` writes the record `pass` with the tree only if all of these hold:
 
