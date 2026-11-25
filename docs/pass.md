@@ -77,6 +77,14 @@ A record `step` or `skip` also logs how long the step took:
 
 The records `pass` and `no-pass` also log `seconds`, the time from the tree of the run to the record. They also log `times`, a list with the step, the kind and the seconds of each step and skip.
 
+`jlog pass` also prints these times on one line to stderr, as its last line. So the output of `just check` already shows them:
+
+```text
+jlog: times: lint 4.1 s, typecheck 0.0 s (skip), test 191.3 s, integration 495.0 s; total 690.4 s
+```
+
+A `;` comes before the total, so a step named `total` stays apart. A time that the log does not have shows as `-`, as for a run that an older `jlog` began. The line comes for a no-pass too, after its reasons. A step that fails stops `just check` before `jlog pass`, so for a failed step, run `jlog times`.
+
 `jlog times` prints this list for the last run of a check, and logs nothing. The last run of a check is the last run with a step, a skip, a pass or a no-pass, or with a failed line and a line of `just check`. So a `just build` or a `just times` after `just check` does not hide the check, even when it fails. `jlog times RUN` prints the list for the run `RUN`:
 
 ```text

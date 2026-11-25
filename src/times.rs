@@ -135,6 +135,25 @@ pub fn summary(records: &[Value], now: f64) -> Summary {
     }
 }
 
+/// The summary as one line, as `jlog pass` prints it at the end of `just
+/// check`: `times: lint 4.1 s, test 191.3 s (skip); total 195.6 s`. The `;`
+/// keeps the total apart from a step named `total`.
+pub fn one_line(s: &Summary) -> String {
+    let parts: Vec<String> = s
+        .times
+        .iter()
+        .map(|t| {
+            let skip = if t.kind == "skip" { " (skip)" } else { "" };
+            format!("{} {}{skip}", t.step, secs(t.seconds))
+        })
+        .collect();
+    let total = format!("total {}", secs(s.seconds));
+    if parts.is_empty() {
+        return format!("times: {total}");
+    }
+    format!("times: {}; {total}", parts.join(", "))
+}
+
 fn marks(records: &[Value]) -> Vec<Time> {
     records
         .iter()
@@ -394,6 +413,23 @@ mod tests {
             }
         );
         assert_eq!(s.times[1].kind, "skip");
+    }
+
+    #[test]
+    fn the_summary_fits_on_one_line() {
+        assert_eq!(
+            one_line(&summary(&run(), 110.25)),
+            "times: lint 4.5 s, typecheck 0.1 s (skip); total 10.2 s"
+        );
+        let old = summary(
+            &[
+                json!({"kind": "tree"}),
+                json!({"kind": "step", "step": "lint"}),
+            ],
+            5.0,
+        );
+        assert_eq!(one_line(&old), "times: lint -; total -");
+        assert_eq!(one_line(&summary(&[], 1.0)), "times: total -");
     }
 
     #[test]
