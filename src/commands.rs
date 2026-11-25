@@ -441,6 +441,8 @@ fn pass() -> i32 {
     }
     let now = SystemTime::now();
     let summary = crate::times::summary(&records, time::unix(now));
+    // One line for a person or an agent, on stderr, so stdout keeps only the record.
+    let line = crate::times::one_line(&summary);
     if reasons.is_empty() {
         let tree = tree.expect("a tree when there is no reason");
         let steps = read_stack(&root).map(|s| s.steps).unwrap_or_default();
@@ -449,13 +451,16 @@ fn pass() -> i32 {
             steps,
             summary,
         };
-        return write(&Record::new("pass", run.as_deref(), &session, now, body));
+        let code = write(&Record::new("pass", run.as_deref(), &session, now, body));
+        warn(format_args!("{line}"));
+        return code;
     }
     for r in &reasons {
         warn(format_args!("no pass: {r}"));
     }
     let body = NoPass { reasons, summary };
     let _ = write(&Record::new("no-pass", run.as_deref(), &session, now, body));
+    warn(format_args!("{line}"));
     1
 }
 

@@ -539,7 +539,8 @@ Each record has `at`, its time in seconds since 1970, to the millisecond. A line
 also has `seconds`, its time. A step or a skip has `start` and `seconds`: the
 time from the record before it in the run, the tree or the step or skip before
 it. The pass and the no-pass have `seconds`, the time of the whole run, and
-`times`, the seconds of each step. `jlog times` prints them, and for a failed
+`times`, the seconds of each step. `jlog pass` prints them on one line to
+stderr, as its last line. `jlog times` prints them, and for a failed
 run, the time up to the failed line and the line itself. Gossil asked for this on 2026-11-22: a
 `just check` of 911 s had an integration step of 495 s, which only timing by
 hand found.

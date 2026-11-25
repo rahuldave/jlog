@@ -133,9 +133,15 @@ fn no_pass_with_an_unstaged_change_or_an_untracked_file() {
     fs::write(r.path().join("src.txt"), "two\n").unwrap();
     let out = just(r.path(), &["check"], &[]);
     assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("unstaged changes or untracked files: src.txt"));
+    // A no-pass prints the times too, after its reasons.
+    let reason = err.find("no pass: ").unwrap();
+    let times = err.find("jlog: times: lint ").expect("the times line");
+    assert!(reason < times, "{err}");
     assert!(
-        String::from_utf8_lossy(&out.stderr)
-            .contains("unstaged changes or untracked files: src.txt")
+        err[times..].lines().next().unwrap().contains("; total "),
+        "{err}"
     );
     git(r.path(), &["checkout", "--", "src.txt"]);
     fs::write(r.path().join("new.txt"), "n\n").unwrap();
@@ -623,6 +629,15 @@ fn each_step_skip_and_pass_logs_its_time() {
     assert_eq!(pass["times"][0]["kind"], "step");
     assert_eq!(pass["times"][0]["seconds"], step["seconds"]);
     assert_eq!(pass["times"][1]["kind"], "skip");
+    // `jlog pass` ends `just check` with one line of the times, on stderr.
+    let err = String::from_utf8_lossy(&out.stderr);
+    let last = err.lines().last().unwrap_or("");
+    assert!(
+        last.starts_with("jlog: times: lint ")
+            && last.contains(", typecheck ")
+            && last.contains(" s (skip); total "),
+        "{err}"
+    );
     let line = run_log(r.path())
         .into_iter()
         .find(|l| l["line"] == "sleep 0.3")
